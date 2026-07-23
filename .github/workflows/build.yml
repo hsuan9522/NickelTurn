@@ -1,0 +1,39 @@
+name: Build KoboRoot
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source and NickelHook
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build KoboRoot.tgz
+        run: |
+          docker run --rm \
+            --volume="$GITHUB_WORKSPACE:/work" \
+            --user="$(id -u):$(id -g)" \
+            --workdir=/work \
+            --env=HOME \
+            --entrypoint=make \
+            ghcr.io/pgaskin/nickeltc:1.0 \
+            clean all koboroot NT_BUILD=full
+
+      - name: Upload KoboRoot package
+        uses: actions/upload-artifact@v4
+        with:
+          name: KoboRoot-${{ github.sha }}
+          path: KoboRoot.tgz
+          if-no-files-found: error
+          retention-days: 14
