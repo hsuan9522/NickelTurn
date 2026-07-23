@@ -1,0 +1,14 @@
+# make gitignore
+.DS_Store
+.kdev4/
+*.kdev4
+.kateconfig
+.vscode/
+.idea/
+.clangd/
+.cache/
+compile_commands.json
+/KoboRoot*.tgz
+/libnickelturn.so
+/libnickel.so.1.0.0
+*.o
