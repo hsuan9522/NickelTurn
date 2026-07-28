@@ -93,6 +93,8 @@ const char kNickelTurnToggleScriptContents[] =
     "[ -f /usr/local/Kobo/imageformats/libnickelturn.so ] || exit 1\n"
     "pid=$(pidof nickel)\n[ -n \"$pid\" ] || exit 1\n"
     "kill -USR1 $pid\n";
+// 隱藏新版首頁底部導覽列的 NickelMenu 按鈕；閱讀器選單的直橫排互換項目仍會保留。
+const char kNickelTurnExperimentalSetting[] = "experimental:menu_main_15505_0_enabled:0\n";
 const char kNickelTurnMenuItem[] = "menu_item:reader:\xE7\x9B\xB4\xE6\xA9\xAB\xE6\x8E\x92\xE4\xBA\x92\xE6\x8F\x9B:cmd_output:1000:quiet:/mnt/onboard/.adds/nickel-turn/nickelturn-toggle\n";
 const char kNickelTurnMenuFailure[] =
     "chain_failure:dbg_error:NickelTurn \xE7\x84\xA1\xE6\xB3\x95\xE5\x95\x9F\xE7\x94\xA8\xEF\xBC\x9A"
@@ -838,6 +840,7 @@ static void ensureNickelTurnMenuConfig() {
     FILE *config = fopen(kNickelTurnNickelMenuConfig, "w");
     if (config) {
         fputs("# Managed by NickelTurn.\n", config);
+        fputs(kNickelTurnExperimentalSetting, config);
         fputs(kNickelTurnMenuItem, config);
         fputs(kNickelTurnMenuFailure, config);
         fclose(config);
