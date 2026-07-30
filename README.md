@@ -5,6 +5,8 @@ NickelTurn is a small NickelHook mod for the supplied Kobo firmware and
 stores the requested layout for the current book and restores it when that
 book is opened again.
 
+Licensed under the [MIT License](LICENSE).
+
 > [!WARNING]
 > Most of this project was produced with AI assistance. It is an experimental,
 > firmware-specific mod which hooks Kobo's private Nickel internals. Installing
