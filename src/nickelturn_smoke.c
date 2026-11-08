@@ -13,7 +13,7 @@ static bool nickelturn_smoke_uninstall(void) { return true; }
 static struct nh_info NickelTurnSmoke = {
     .name = "NickelTurn",
     .desc = "NickelTurn smoke load check",
-    .uninstall_flag = "/mnt/onboard/.adds/nickelturn/uninstall",
+    .uninstall_flag = "/mnt/onboard/.adds/nickel-turn/uninstall",
     .failsafe_delay = 20,
 };
 

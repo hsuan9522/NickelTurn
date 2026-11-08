@@ -4,6 +4,7 @@ override LIBRARY := libnickelturn.so
 override SOURCES += src/nickelturn_log.c
 override CFLAGS += -Wall -Wextra -Werror
 override CXXFLAGS += -Wall -Wextra -Werror -Wno-missing-field-initializers
+override KOBOROOT += config/nickelturn:/mnt/onboard/.adds/nm/nickelturn
 
 # Public build profiles. The implementation's historical proof stages are no
 # longer selectable: `full` is the verified Stage 21 feature set, while

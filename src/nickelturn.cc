@@ -91,7 +91,6 @@ struct NativeKepubApi {
     BookmarkSharedDataAssignFn assign_bookmark_shared_data;
 };
 static NativeKepubApi g_native_kepub_api = {};
-const char kNickelMenuConfigDirectory[] = "/mnt/onboard/.adds/nm";
 const char kNickelTurnNickelMenuConfig[] = "/mnt/onboard/.adds/nm/nickelturn";
 const char kNickelTurnToggleScript[] = "/mnt/onboard/.adds/nickel-turn/nickelturn-toggle";
 const char kNickelTurnReadyFlag[] = "/mnt/onboard/.adds/nickel-turn/ready";
@@ -101,12 +100,6 @@ const char kNickelTurnToggleScriptContents[] =
     "[ -f /usr/local/Kobo/imageformats/libnickelturn.so ] || exit 1\n"
     "pid=$(pidof nickel)\n[ -n \"$pid\" ] || exit 1\n"
     "kill -USR1 $pid\n";
-// 隱藏新版首頁底部導覽列的 NickelMenu 按鈕；閱讀器選單的直橫排互換項目仍會保留。
-const char kNickelTurnExperimentalSetting[] = "experimental:menu_main_15505_0_enabled:0\n";
-const char kNickelTurnMenuItem[] = "menu_item:reader:\xE7\x9B\xB4\xE6\xA9\xAB\xE6\x8E\x92\xE4\xBA\x92\xE6\x8F\x9B:cmd_output:1000:quiet:/mnt/onboard/.adds/nickel-turn/nickelturn-toggle\n";
-const char kNickelTurnMenuFailure[] =
-    "chain_failure:dbg_error:NickelTurn \xE7\x84\xA1\xE6\xB3\x95\xE5\x95\x9F\xE7\x94\xA8\xEF\xBC\x9A"
-    "firmware \xE4\xB8\x8D\xE6\x94\xAF\xE6\x8F\xB4\xE6\x88\x96\xE5\x88\x9D\xE5\xA7\x8B\xE5\x8C\x96\xE5\xA4\xB1\xE6\x95\x97\n";
 static volatile sig_atomic_t g_nickelmenu_toggle_requested = 0;
 static QTimer *g_nickelmenu_toggle_timer = nullptr;
 static QString g_pending_native_anchor_content_id;
@@ -716,7 +709,7 @@ void *nickelturn_webkit_set_writing_direction = nullptr;
 
 static void recordActiveContentDiagnostic(const QString &content_id);
 
-// 卸載時直接移除 NickelTurn 完全擁有的 NickelMenu 設定與 signal script。
+// 設定內容由 config/nickelturn 封裝；此處只在卸載時移除該獨立設定檔。
 extern "C" bool nickelturn_uninstall(void) {
     bool ok = true;
     if (unlink(kNickelTurnNickelMenuConfig) != 0 && errno != ENOENT)
@@ -828,7 +821,6 @@ static void nickelturn_toggle_signal_handler(int) {
 static void ensureNickelTurnDirectories() {
     (void)mkdir("/mnt/onboard/.adds", 0755);
     (void)mkdir("/mnt/onboard/.adds/nickel-turn", 0755);
-    (void)mkdir(kNickelMenuConfigDirectory, 0755);
 }
 
 // 更新 NickelTurn 完全管理的 script；未通過 init 驗證時它會以非零狀態結束，
@@ -839,19 +831,6 @@ static void ensureNickelTurnToggleScript() {
         fputs(kNickelTurnToggleScriptContents, script);
         fclose(script);
         (void)chmod(kNickelTurnToggleScript, 0755);
-    }
-}
-
-// 更新 NickelTurn 完全管理的 NickelMenu 項目，確保舊的 cmd_spawn 格式會遷移至
-// cmd_output + chain_failure；此設定檔不接受使用者自訂內容。
-static void ensureNickelTurnMenuConfig() {
-    FILE *config = fopen(kNickelTurnNickelMenuConfig, "w");
-    if (config) {
-        fputs("# Managed by NickelTurn.\n", config);
-        fputs(kNickelTurnExperimentalSetting, config);
-        fputs(kNickelTurnMenuItem, config);
-        fputs(kNickelTurnMenuFailure, config);
-        fclose(config);
     }
 }
 
@@ -1044,7 +1023,6 @@ static void processNickelTurnTimer() {
 static void installNickelMenuBridge() {
     ensureNickelTurnDirectories();
     ensureNickelTurnToggleScript();
-    ensureNickelTurnMenuConfig();
     if (!installNickelTurnToggleSignalHandler())
         return;
     QCoreApplication *app = QCoreApplication::instance();

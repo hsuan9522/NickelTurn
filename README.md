@@ -18,7 +18,7 @@ Licensed under the [MIT License](LICENSE).
 
 ## 移除方式
 
-在 .adds/nickelturn 資料夾中新增一個名為 uninstall 的檔案即可。
+在 `.adds/nickel-turn` 資料夾中新增一個名為 `uninstall` 的檔案即可。新版不再監看舊路徑 `.adds/nickelturn/uninstall`；若升級時已建立舊旗標，請將它移到 `.adds/nickel-turn/uninstall`。卸載時會移除 NickelTurn 的 NickelMenu 設定檔與切換腳本。
 
 
 ## Build profiles
@@ -45,9 +45,12 @@ update is still in progress.
 
 ## Use
 
-NickelTurn writes a small NickelMenu configuration file at
-`.adds/nm/nickelturn`; this requires NickelMenu to be installed. Open a KEPUB,
-open NickelMenu's Reader menu, and choose **直橫排互換**.
+NickelTurn's NickelMenu configuration is included in `KoboRoot.tgz` and
+installed at `.adds/nm/nickelturn`; NickelMenu must also be installed. NickelTurn
+does not recreate or overwrite this file during startup, so manual edits and
+deletion persist across restarts. Reinstalling or upgrading the package installs
+the bundled default config again. Open a KEPUB, open NickelMenu's Reader menu,
+and choose **直橫排互換**.
 
 The selected mode is stored in:
 

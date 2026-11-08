@@ -27,7 +27,7 @@ extern void *nickelturn_webkit_set_writing_direction;
 static struct nh_info NickelTurn = {
     .name = "NickelTurn",
     .desc = "KEPUB vertical/horizontal layout toggle",
-    .uninstall_flag = "/mnt/onboard/.adds/nickelturn/uninstall",
+    .uninstall_flag = "/mnt/onboard/.adds/nickel-turn/uninstall",
     // 啟動時 crash 會留下 .failsafe library，供下一次開機自動復原。
     .failsafe_delay = 20,
 };
