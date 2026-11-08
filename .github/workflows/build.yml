@@ -3,7 +3,7 @@ name: Build KoboRoot
 on:
   push:
     branches: [master]
-    tags: ["v*"]
+    tags: ["v*-*"]
   pull_request:
   workflow_dispatch:
 
@@ -43,6 +43,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           files: KoboRoot.tgz
           generate_release_notes: true
           fail_on_unmatched_files: true

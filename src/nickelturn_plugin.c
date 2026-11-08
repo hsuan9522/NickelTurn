@@ -33,6 +33,9 @@ static struct nh_info NickelTurn = {
 };
 
 static struct nh_hook NickelTurnHook[] = {
+    // ！！韌體升級檢查點：NickelHook 以這些 mangled symbol 名稱解析／替換函式。
+    // 新版若改名、移除或改變 hook ABI，需依新 libnickel 更新名稱與實作，
+    // 並同步檢查 nickelturn.cc 的 dlsym 清單、offset guard 和函式型別。
     {
         .sym = "_ZN10WebkitView12addCssToHtmlE7QString",
         .sym_new = "NickelTurnWebkitAddCssToHtml",

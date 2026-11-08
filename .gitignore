@@ -12,3 +12,4 @@ compile_commands.json
 /libnickelturn.so
 /libnickel.so.1.0.0
 *.o
+/*-libnickel.so.1.0.0

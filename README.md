@@ -1,20 +1,25 @@
 # NickelTurn
 
-NickelTurn is a small NickelHook mod for the supplied Kobo firmware and
-`.kepub.epub` books. It adds a NickelMenu Reader action, **直橫排互換**, which
-stores the requested layout for the current book and restores it when that
-book is opened again.
+NickelTurn 是一個**實驗性功能**，建議安裝前先備份閱讀器，且風險自負。
+這個功能是提供給 Kobo 閱讀器使用者，在閱讀時輕鬆的轉換直橫排模式。目前只適用於 `KEPUB` 格式的書籍。此功能會搭配 NickelMenu 在閱讀模式的設定列中生成一個**直橫排互換**按鈕。
+
+主要的實機測試為 Clara BW，後續更新也僅會使用此機種測試。
+另外，之前也有使用 Libra Colour 測試過，除非有什麼太重大的更新，否則應該都是可以通用的。
+
 
 Licensed under the [MIT License](LICENSE).
 
-> [!WARNING]
-> Most of this project was produced with AI assistance. It is an experimental,
-> firmware-specific mod which hooks Kobo's private Nickel internals. Installing
-> or using it may cause Nickel to crash, require manual recovery, or behave
-> unexpectedly after a firmware update. Use it entirely at your own risk.
+> [!警告]
 
-It targets only the included `libnickel.so.1.0.0`. A firmware mismatch aborts
-during initialization and NickelHook restores the original hooks.
+> 絕大部分的程式碼皆由 AI 生成。為實驗性功能，且需安裝對應的韌體版本。
+
+
+`libnickel.so.1.0.0` 在 `usr/local/Kobo/libnickel.so.1.0.0` 裡可以找到。
+
+## 移除方式
+
+在 .adds/nickelturn 資料夾中新增一個名為 uninstall 的檔案即可。
+
 
 ## Build profiles
 
@@ -23,7 +28,7 @@ interface. There are only two supported profiles:
 
 | Profile | Build argument | Purpose |
 | --- | --- | --- |
-| `full` | default | The verified KEPUB toggle, JSON cache, swipe direction, and delayed native bookmark restore. |
+| `full` | default | KEPUB toggle, JSON cache, swipe direction, and delayed native bookmark restore. |
 | `smoke` | `NT_BUILD=smoke` | Load/failsafe check only. It changes no book layout or state. |
 
 Build the normal package from this directory:
@@ -82,18 +87,7 @@ The persistent log is deliberately not written from CSS/render hooks. Those
 hooks only write to `logread`; this avoids user-storage I/O during reading or
 USB mass-storage sessions.
 
-## Safe removal
 
-While connected by USB, create an empty file:
-
-```text
-.adds/nickelturn/uninstall
-```
-
-Safely eject and allow Nickel to start once. NickelHook sees the flag before
-installing hooks, deletes the plugin library, deletes the flag, and calls
-NickelTurn cleanup to remove only its NickelMenu config and signal script.
-Books and `book-modes.json` are preserved.
 
 ## NickelHook safety notes
 

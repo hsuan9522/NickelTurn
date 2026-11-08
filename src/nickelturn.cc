@@ -34,24 +34,32 @@
 
 namespace {
 
-// 僅針對 2026-07-23 提供的 libnickel.so.1.0.0 驗證過。
-// Build ID: f043a6aed1c782880be5d6075a22619bd8e49dcb
-const uintptr_t kKepubAddCssToHtmlOffset = 0x00fa4a90u;
+// 已核對的韌體：
+// - pre-libnickel.so.1.0.0 Build ID f043a6aed1c782880be5d6075a22619bd8e49dcb
+// - libnickel.so.1.0.0      Build ID 8515657b0cb4e08354dba85716b3b93e1984e2d5
+// 兩版目標函式的符號與大小相符，以下 offset 依各自 ELF dynsym 更新。
+// kReaderBookmarkOffset 是私有 reader 物件欄位，無法由符號表驗證；新版需在
+// 裝置上實際測試位置保留與切換，再視需要以反組譯確認欄位布局。
+const uintptr_t kKepubAddCssToHtmlOffset = 0x00fb06e8u;
 const uintptr_t kKepubAddCssToHtmlSize = 0x000000e8u;
-const uintptr_t kUpdateHtmlCssOffset = 0x00b81510u;
-const uintptr_t kReloadChapterOffset = 0x00b76058u;
-const uintptr_t kBookmarkForCurrentLocationOffset = 0x00b7ac10u;
-const uintptr_t kKepubGoToBookmarkAnchorOffset = 0x00b75c88u;
-const uintptr_t kBookmarkSharedDataAssignOffset = 0x00c72424u;
+const uintptr_t kUpdateHtmlCssOffset = 0x00b89c68u;
+const uintptr_t kReloadChapterOffset = 0x00b7e7b0u;
+const uintptr_t kBookmarkForCurrentLocationOffset = 0x00b83368u;
+const uintptr_t kKepubGoToBookmarkAnchorOffset = 0x00b7e3e0u;
+const uintptr_t kBookmarkSharedDataAssignOffset = 0x00c7aadcu;
+// ！！私有物件版面配置依賴：升級時要重新確認 Reader 中 Bookmark 欄位的位移，
+// 以及對該欄位讀寫的程式碼；這項值不會被函式 offset guard 自動驗證。
 const size_t kReaderBookmarkOffset = 0x1c0u;
-const uintptr_t kContentGetBookIdOffset = 0x00970038u;
-const uintptr_t kKepubRenderShortcoverOffset = 0x00fa56e8u;
+const uintptr_t kContentGetBookIdOffset = 0x00977df0u;
+const uintptr_t kKepubRenderShortcoverOffset = 0x00fb1340u;
 const uintptr_t kKepubRenderShortcoverSize = 0x00000210u;
-const uintptr_t kKepubSetWritingDirectionOffset = 0x00fa5694u;
+const uintptr_t kKepubSetWritingDirectionOffset = 0x00fb12ecu;
 const uintptr_t kKepubSetWritingDirectionSize = 0x00000054u;
-const uintptr_t kWebkitSetWritingDirectionOffset = 0x00bc8b50u;
-const uintptr_t kCustomSetPageProgressionDirectionOffset = 0x00bc11ccu;
+const uintptr_t kWebkitSetWritingDirectionOffset = 0x00bd12a8u;
+const uintptr_t kCustomSetPageProgressionDirectionOffset = 0x00bc9924u;
 
+// ！！下列型別描述 libnickel 的私有 C++/ARM ABI。新版函式即使同名且 offset 可更新，
+// 參數、回傳值、this 指標或 Qt 型別傳遞方式變動時，也必須在此及呼叫點一起更新。
 typedef void (*WebkitAddCssToHtmlFn)(void *, QString);
 typedef void (*KepubUpdateHtmlCssFn)(void *);
 typedef void (*KepubReloadChapterFn)(void *);
