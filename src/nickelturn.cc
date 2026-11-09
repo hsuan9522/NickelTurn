@@ -34,29 +34,10 @@
 
 namespace {
 
-// 已核對的韌體：
-// - pre-libnickel.so.1.0.0 Build ID f043a6aed1c782880be5d6075a22619bd8e49dcb
-// - libnickel.so.1.0.0      Build ID 8515657b0cb4e08354dba85716b3b93e1984e2d5
-// 兩版目標函式的符號與大小相符，以下 offset 依各自 ELF dynsym 更新。
-// kReaderBookmarkOffset 是私有 reader 物件欄位，無法由符號表驗證；新版需在
-// 裝置上實際測試位置保留與切換，再視需要以反組譯確認欄位布局。
-const uintptr_t kKepubAddCssToHtmlOffset = 0x00fb06e8u;
-const uintptr_t kKepubAddCssToHtmlSize = 0x000000e8u;
-const uintptr_t kUpdateHtmlCssOffset = 0x00b89c68u;
-const uintptr_t kReloadChapterOffset = 0x00b7e7b0u;
-const uintptr_t kBookmarkForCurrentLocationOffset = 0x00b83368u;
-const uintptr_t kKepubGoToBookmarkAnchorOffset = 0x00b7e3e0u;
-const uintptr_t kBookmarkSharedDataAssignOffset = 0x00c7aadcu;
-// ！！私有物件版面配置依賴：升級時要重新確認 Reader 中 Bookmark 欄位的位移，
-// 以及對該欄位讀寫的程式碼；這項值不會被函式 offset guard 自動驗證。
-const size_t kReaderBookmarkOffset = 0x1c0u;
-const uintptr_t kContentGetBookIdOffset = 0x00977df0u;
-const uintptr_t kKepubRenderShortcoverOffset = 0x00fb1340u;
-const uintptr_t kKepubRenderShortcoverSize = 0x00000210u;
-const uintptr_t kKepubSetWritingDirectionOffset = 0x00fb12ecu;
-const uintptr_t kKepubSetWritingDirectionSize = 0x00000054u;
-const uintptr_t kWebkitSetWritingDirectionOffset = 0x00bd12a8u;
-const uintptr_t kCustomSetPageProgressionDirectionOffset = 0x00bc9924u;
+#ifndef NT_FIRMWARE_PROFILE_HEADER
+#error "The Makefile must select NT_FIRMWARE_PROFILE_HEADER"
+#endif
+#include NT_FIRMWARE_PROFILE_HEADER
 
 // ！！下列型別描述 libnickel 的私有 C++/ARM ABI。新版函式即使同名且 offset 可更新，
 // 參數、回傳值、this 指標或 Qt 型別傳遞方式變動時，也必須在此及呼叫點一起更新。
@@ -94,12 +75,6 @@ static NativeKepubApi g_native_kepub_api = {};
 const char kNickelTurnNickelMenuConfig[] = "/mnt/onboard/.adds/nm/nickelturn";
 const char kNickelTurnToggleScript[] = "/mnt/onboard/.adds/nickel-turn/nickelturn-toggle";
 const char kNickelTurnReadyFlag[] = "/mnt/onboard/.adds/nickel-turn/ready";
-const char kNickelTurnToggleScriptContents[] =
-    "#!/bin/sh\n"
-    "[ -f /mnt/onboard/.adds/nickel-turn/ready ] || exit 1\n"
-    "[ -f /usr/local/Kobo/imageformats/libnickelturn.so ] || exit 1\n"
-    "pid=$(pidof nickel)\n[ -n \"$pid\" ] || exit 1\n"
-    "kill -USR1 $pid\n";
 static volatile sig_atomic_t g_nickelmenu_toggle_requested = 0;
 static QTimer *g_nickelmenu_toggle_timer = nullptr;
 static QString g_pending_native_anchor_content_id;
@@ -108,23 +83,6 @@ static unsigned int g_pending_native_anchor_generation = 0;
 static unsigned int g_pending_native_anchor_ticks = 0;
 static unsigned int g_pending_horizontal_generation = 0;
 static unsigned int g_pending_horizontal_ticks = 0;
-
-// CSS hook 偵測到原始模式後只暫存事件；由 Qt timer 安全寫入持久 log。
-struct SourceModeDiagnostic {
-    bool pending;
-    char mode[16];
-    char content_id[512];
-};
-static SourceModeDiagnostic g_source_mode_diagnostic = {};
-static pthread_mutex_t g_source_mode_diagnostic_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-// Content::getBookId hook 偵測到新書時暫存識別碼；由 Qt timer 寫入持久 log。
-struct ActiveContentDiagnostic {
-    bool pending;
-    char content_id[512];
-};
-static ActiveContentDiagnostic g_active_content_diagnostic = {};
-static pthread_mutex_t g_active_content_diagnostic_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // 一次性 CSS handoff 診斷只保留在記憶體；由 Qt timer 安全地寫入持久 log。
 enum CssHandoffDiagnosticResult {
@@ -257,13 +215,16 @@ void parseModeJsonAtInit() {
         (void)pthread_mutex_lock(&g_mode_json_cache_mutex);
         g_mode_json_write_allowed = true;
         (void)pthread_mutex_unlock(&g_mode_json_cache_mutex);
-        nickelturn_event_log("NickelTurn mode JSON path absent; no file opened");
         return;
     }
     const qint64 size = file.size();
-    if (size < 0 || size > kMaxModeJsonBytes) {
-        nickelturn_event_log("NickelTurn mode JSON size is unavailable or exceeds %ld bytes; no file opened",
-                             (long)kMaxModeJsonBytes);
+    if (size < 0) {
+        nickelturn_event_log("NickelTurn mode JSON size query failed; no file opened");
+        return;
+    }
+    if (size > kMaxModeJsonBytes) {
+        nickelturn_event_log("NickelTurn mode JSON exceeds size limit bytes=%ld limit=%ld; no file opened",
+                             (long)size, (long)kMaxModeJsonBytes);
         return;
     }
     if (!file.open(QIODevice::ReadOnly)) {
@@ -275,7 +236,10 @@ void parseModeJsonAtInit() {
     const QString read_error = file.error() == QFile::NoError ? QString() : file.errorString();
     file.close();
     if (!read_error.isEmpty() || bytes.size() > kMaxModeJsonBytes) {
-        nickelturn_event_log("NickelTurn mode JSON read failed or exceeded %ld bytes", (long)kMaxModeJsonBytes);
+        const QByteArray read_error_utf8 = read_error.toUtf8();
+        nickelturn_event_log("NickelTurn mode JSON read failed bytes=%d limit=%ld error=%s",
+                             bytes.size(), (long)kMaxModeJsonBytes,
+                             read_error.isEmpty() ? "size limit exceeded" : read_error_utf8.constData());
         return;
     }
 
@@ -283,7 +247,8 @@ void parseModeJsonAtInit() {
     const QJsonDocument document = QJsonDocument::fromJson(bytes, &parse_error);
     if (parse_error.error != QJsonParseError::NoError || !document.isObject()) {
         const QByteArray error_utf8 = parse_error.errorString().toUtf8();
-        nickelturn_event_log("NickelTurn mode JSON parse failed error=%s", error_utf8.constData());
+        nickelturn_event_log("NickelTurn mode JSON parse failed offset=%lld error=%s",
+                             (long long)parse_error.offset, error_utf8.constData());
         return;
     }
     const QJsonObject root = document.object();
@@ -361,6 +326,8 @@ bool writeAll(int fd, const char *data, size_t size) {
         } else if (written < 0 && errno == EINTR) {
             continue;
         } else {
+            if (written == 0)
+                errno = EIO;
             return false;
         }
     }
@@ -453,24 +420,50 @@ bool persistCachedModeJson(const QString &content_id, const char *mode) {
     const int n = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", kModeJsonPath, (long)getpid());
     if (n < 0 || (size_t)n >= sizeof(temporary)) {
         freeModeJsonEntries(next_entries, next_count);
+        nickelturn_event_log("NickelTurn mode JSON temporary path is too long ContentID=%s",
+                             content_id_utf8.constData());
         return false;
     }
     const int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
+        const int error = errno;
         freeModeJsonEntries(next_entries, next_count);
+        nickelturn_event_log("NickelTurn mode JSON temporary file open failed error=%s ContentID=%s",
+                             strerror(error), content_id_utf8.constData());
         return false;
     }
+    const char *failure_stage = nullptr;
+    int failure_errno = 0;
     bool ok = writeAll(fd, bytes.constData(), (size_t)bytes.size());
-    if (ok)
-        ok = fsync(fd) == 0;
+    if (!ok) {
+        failure_stage = "write";
+        failure_errno = errno == 0 ? EIO : errno;
+    }
+    if (ok && fsync(fd) != 0) {
+        ok = false;
+        failure_stage = "fsync";
+        failure_errno = errno;
+    }
     // 每個 descriptor 只關閉一次；rename 失敗後不可重試 close()，因為該
     // descriptor 編號可能已被系統重新使用。
-    if (close(fd) != 0)
+    if (close(fd) != 0) {
         ok = false;
-    if (ok) ok = rename(temporary, kModeJsonPath) == 0;
+        if (failure_stage == nullptr) {
+            failure_stage = "close";
+            failure_errno = errno;
+        }
+    }
+    if (ok && rename(temporary, kModeJsonPath) != 0) {
+        ok = false;
+        failure_stage = "rename";
+        failure_errno = errno;
+    }
     if (!ok) {
         (void)unlink(temporary);
         freeModeJsonEntries(next_entries, next_count);
+        nickelturn_event_log("NickelTurn mode JSON %s failed error=%s ContentID=%s",
+                             failure_stage == nullptr ? "persist" : failure_stage,
+                             strerror(failure_errno), content_id_utf8.constData());
         return false;
     }
 
@@ -516,28 +509,13 @@ bool wasCalledByKepubSetWritingDirection(uintptr_t return_address) {
 void observeVerticalSourceModeFromCss(const QString &css) {
     if (!css.contains(QLatin1String("vertical-rl"), Qt::CaseInsensitive))
         return;
-    QString content_id;
-    bool corrected = false;
     (void)pthread_mutex_lock(&g_source_mode_mutex);
     if (!g_active_content_id.isEmpty() && g_source_mode != SourceModeVerticalRL) {
         g_source_mode = SourceModeVerticalRL;
         g_pending_horizontal_ticks = 0u;
         ++g_direction_generation;
-        content_id = g_active_content_id;
-        corrected = true;
     }
     (void)pthread_mutex_unlock(&g_source_mode_mutex);
-    if (corrected) {
-        const QByteArray content_id_utf8 = content_id.toUtf8();
-        (void)pthread_mutex_lock(&g_source_mode_diagnostic_mutex);
-        g_source_mode_diagnostic.pending = true;
-        (void)snprintf(g_source_mode_diagnostic.mode, sizeof(g_source_mode_diagnostic.mode),
-                       "%s", "vertical-rl");
-        (void)snprintf(g_source_mode_diagnostic.content_id,
-                       sizeof(g_source_mode_diagnostic.content_id), "%s",
-                       content_id_utf8.constData());
-        (void)pthread_mutex_unlock(&g_source_mode_diagnostic_mutex);
-    }
 }
 
 // 將內部排版列舉轉為 JSON 與 CSS 使用的模式字串。
@@ -589,10 +567,10 @@ struct FirmwareOffsetGuard {
 };
 
 // 確認 NickelHook 已解析所有本外掛會使用的 symbol，避免後續解參考空指標。
-bool areRequiredSymbolsAvailable(void *const *symbols, size_t count) {
+bool areRequiredSymbolsAvailable(void *const *symbols, const char *const *names, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         if (symbols[i] == nullptr) {
-            nickelturn_event_log("NickelTurn: required symbol unavailable");
+            nickelturn_event_log("NickelTurn: required symbol unavailable name=%s", names[i]);
             return false;
         }
     }
@@ -601,16 +579,25 @@ bool areRequiredSymbolsAvailable(void *const *symbols, size_t count) {
 
 // 確認所有切換流程所需的原生函式入口都已在 firmware guard 後完成設定。
 bool isNativeKepubApiReady() {
-    return g_native_kepub_api.update_html_css != nullptr &&
-           g_native_kepub_api.reload_chapter != nullptr &&
-           g_native_kepub_api.set_writing_direction != nullptr &&
-           g_native_kepub_api.web_view != nullptr &&
-           g_native_kepub_api.set_page_progression != nullptr &&
-           g_native_kepub_api.bookmark_for_current_location != nullptr &&
-           g_native_kepub_api.destroy_bookmark_shared_data != nullptr &&
-           g_native_kepub_api.destroy_scobject != nullptr &&
-           g_native_kepub_api.go_to_bookmark_anchor != nullptr &&
-           g_native_kepub_api.assign_bookmark_shared_data != nullptr;
+#define CHECK_NATIVE_API(field, label) \
+    do { \
+        if (g_native_kepub_api.field == nullptr) { \
+            nickelturn_event_log("NickelTurn: native API entrypoint unavailable name=%s", label); \
+            return false; \
+        } \
+    } while (0)
+    CHECK_NATIVE_API(update_html_css, "updateHtmlCss");
+    CHECK_NATIVE_API(reload_chapter, "reloadChapter");
+    CHECK_NATIVE_API(set_writing_direction, "setWritingDirection");
+    CHECK_NATIVE_API(web_view, "webView");
+    CHECK_NATIVE_API(set_page_progression, "setPageProgressionDirection");
+    CHECK_NATIVE_API(bookmark_for_current_location, "bookmarkForCurrentLocation");
+    CHECK_NATIVE_API(destroy_bookmark_shared_data, "BookmarkSharedData destructor");
+    CHECK_NATIVE_API(destroy_scobject, "ScObject destructor");
+    CHECK_NATIVE_API(go_to_bookmark_anchor, "goToBookmarkAnchor");
+    CHECK_NATIVE_API(assign_bookmark_shared_data, "BookmarkSharedData assignment");
+#undef CHECK_NATIVE_API
+    return true;
 }
 
 // 在一次 toggle 前開始觀測下一次 KEPUB CSS handoff，最多等待兩秒。
@@ -661,8 +648,7 @@ void processCssHandoffDiagnostic() {
         return;
     switch (diagnostic.result) {
     case CssHandoffDiagnosticAppended:
-        nickelturn_event_log("NickelTurn: toggle CSS handoff previous-mode=%s appended-mode=%s ContentID=%s",
-                             diagnostic.previous_mode, diagnostic.mode, diagnostic.content_id);
+        // 成功切換已有一筆摘要；只把異常 handoff 寫入持久 log。
         break;
     case CssHandoffDiagnosticNoActiveContent:
         nickelturn_event_log("NickelTurn: toggle CSS handoff had no active ContentID");
@@ -707,17 +693,23 @@ void *nickelturn_kepub_set_writing_direction = nullptr;
 void *nickelturn_webkit_set_writing_direction = nullptr;
 }
 
-static void recordActiveContentDiagnostic(const QString &content_id);
-
 // 設定內容由 config/nickelturn 封裝；此處只在卸載時移除該獨立設定檔。
 extern "C" bool nickelturn_uninstall(void) {
     bool ok = true;
-    if (unlink(kNickelTurnNickelMenuConfig) != 0 && errno != ENOENT)
+    nickelturn_event_log("NickelTurn: uninstall cleanup started");
+    if (unlink(kNickelTurnNickelMenuConfig) != 0 && errno != ENOENT) {
+        nickelturn_event_log("NickelTurn: failed to remove NickelMenu config error=%s", strerror(errno));
         ok = false;
-    if (unlink(kNickelTurnToggleScript) != 0 && errno != ENOENT)
+    }
+    if (unlink(kNickelTurnToggleScript) != 0 && errno != ENOENT) {
+        nickelturn_event_log("NickelTurn: failed to remove toggle script error=%s", strerror(errno));
         ok = false;
-    if (unlink(kNickelTurnReadyFlag) != 0 && errno != ENOENT)
+    }
+    if (unlink(kNickelTurnReadyFlag) != 0 && errno != ENOENT) {
+        nickelturn_event_log("NickelTurn: failed to remove ready marker error=%s", strerror(errno));
         ok = false;
+    }
+    nickelturn_event_log("NickelTurn: uninstall cleanup %s", ok ? "completed" : "incomplete");
     return ok;
 }
 
@@ -751,7 +743,6 @@ extern "C" void NickelTurnContentGetBookId(QString *result, const void *content)
         g_active_webkit_view = nullptr;
         ++g_direction_generation;
         (void)pthread_mutex_unlock(&g_source_mode_mutex);
-        recordActiveContentDiagnostic(*result);
     }
 }
 
@@ -818,32 +809,38 @@ static void nickelturn_toggle_signal_handler(int) {
 }
 
 // 建立 NickelTurn 自己使用的目錄；既有目錄與檔案都不會被刪除。
-static void ensureNickelTurnDirectories() {
-    (void)mkdir("/mnt/onboard/.adds", 0755);
-    (void)mkdir("/mnt/onboard/.adds/nickel-turn", 0755);
-}
-
-// 更新 NickelTurn 完全管理的 script；未通過 init 驗證時它會以非零狀態結束，
-// 讓 NickelMenu 的 chain_failure 顯示錯誤而不是對 Nickel 發送未處理的 SIGUSR1。
-static void ensureNickelTurnToggleScript() {
-    FILE *script = fopen(kNickelTurnToggleScript, "w");
-    if (script) {
-        fputs(kNickelTurnToggleScriptContents, script);
-        fclose(script);
-        (void)chmod(kNickelTurnToggleScript, 0755);
+static bool ensureNickelTurnDirectories() {
+    if (mkdir("/mnt/onboard/.adds", 0755) != 0 && errno != EEXIST) {
+        nickelturn_event_log("NickelTurn: cannot create .adds directory error=%s", strerror(errno));
+        return false;
     }
+    if (mkdir("/mnt/onboard/.adds/nickel-turn", 0755) != 0 && errno != EEXIST) {
+        nickelturn_event_log("NickelTurn: cannot create nickel-turn directory error=%s", strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 // 成功啟動全部 toggle 元件後才建立 ready marker，讓 script 可以安全發送 SIGUSR1。
-static void markNickelTurnReady() {
+static bool markNickelTurnReady() {
     const int fd = open(kNickelTurnReadyFlag, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        return;
-    static const char kReadyContents[] = "ready\n";
-    const bool ok = writeAll(fd, kReadyContents, sizeof(kReadyContents) - 1u);
-    (void)close(fd);
-    if (!ok)
+    if (fd < 0) {
+        nickelturn_event_log("NickelTurn: cannot create ready marker error=%s", strerror(errno));
+        return false;
+    }
+    char ready_contents[32];
+    const int ready_size = snprintf(ready_contents, sizeof(ready_contents), "%ld\n", (long)getpid());
+    const bool ok = ready_size > 0 && (size_t)ready_size < sizeof(ready_contents) &&
+                    writeAll(fd, ready_contents, (size_t)ready_size);
+    int error = ok ? 0 : (errno == 0 ? EIO : errno);
+    if (close(fd) != 0 && error == 0)
+        error = errno;
+    if (error != 0) {
         (void)unlink(kNickelTurnReadyFlag);
+        nickelturn_event_log("NickelTurn: cannot write ready marker error=%s", strerror(error));
+        return false;
+    }
+    return true;
 }
 
 // 安裝 SIGUSR1 handler；handler 本身只設旗標，避免在 signal context 操作 Qt。
@@ -864,60 +861,12 @@ static bool installNickelTurnToggleSignalHandler() {
 static void processPendingHorizontalSourceMode() {
     if (g_pending_horizontal_ticks == 0u || --g_pending_horizontal_ticks != 0u)
         return;
-    QString content_id;
-    bool confirmed = false;
     (void)pthread_mutex_lock(&g_source_mode_mutex);
     if (g_pending_horizontal_generation == g_direction_generation &&
         !g_active_content_id.isEmpty() && g_source_mode == SourceModeUnknown) {
         g_source_mode = SourceModeHorizontal;
-        content_id = g_active_content_id;
-        confirmed = true;
     }
     (void)pthread_mutex_unlock(&g_source_mode_mutex);
-    if (confirmed) {
-        nickelturn_event_log("NickelTurn: source mode=horizontal-tb ContentID=%s",
-                             content_id.toUtf8().constData());
-    }
-}
-
-// 在 Qt timer 中將 CSS hook 偵測到的原始排版模式寫入持久 log。
-static void processPendingSourceModeDiagnostic() {
-    SourceModeDiagnostic diagnostic = {};
-    (void)pthread_mutex_lock(&g_source_mode_diagnostic_mutex);
-    if (g_source_mode_diagnostic.pending) {
-        diagnostic = g_source_mode_diagnostic;
-        g_source_mode_diagnostic.pending = false;
-    }
-    (void)pthread_mutex_unlock(&g_source_mode_diagnostic_mutex);
-    if (diagnostic.pending) {
-        nickelturn_event_log("NickelTurn: source mode=%s from KEPUB CSS ContentID=%s",
-                             diagnostic.mode, diagnostic.content_id);
-    }
-}
-
-// 在 Content::getBookId hook 中暫存新書識別碼；不可在 hook 直接寫入使用者儲存區。
-static void recordActiveContentDiagnostic(const QString &content_id) {
-    const QByteArray content_id_utf8 = content_id.toUtf8();
-    (void)pthread_mutex_lock(&g_active_content_diagnostic_mutex);
-    g_active_content_diagnostic.pending = true;
-    (void)snprintf(g_active_content_diagnostic.content_id,
-                   sizeof(g_active_content_diagnostic.content_id), "%s",
-                   content_id_utf8.constData());
-    (void)pthread_mutex_unlock(&g_active_content_diagnostic_mutex);
-}
-
-// 在 Qt timer 中寫入目前開啟的 KEPUB ContentID。
-static void processPendingActiveContentDiagnostic() {
-    ActiveContentDiagnostic diagnostic = {};
-    (void)pthread_mutex_lock(&g_active_content_diagnostic_mutex);
-    if (g_active_content_diagnostic.pending) {
-        diagnostic = g_active_content_diagnostic;
-        g_active_content_diagnostic.pending = false;
-    }
-    (void)pthread_mutex_unlock(&g_active_content_diagnostic_mutex);
-    if (diagnostic.pending) {
-        nickelturn_event_log("NickelTurn: active KEPUB ContentID=%s", diagnostic.content_id);
-    }
 }
 
 // 在新章節 DOM 建立後，以 Kobo 原生 Bookmark API 回到切換前的位置。
@@ -936,9 +885,14 @@ static void processPendingNativeAnchorRestore() {
     if (still_active) {
         if (g_native_kepub_api.go_to_bookmark_anchor != nullptr) {
             g_native_kepub_api.go_to_bookmark_anchor(anchor_webkit_view);
-            nickelturn_event_log("NickelTurn: delayed native anchor restore requested ContentID=%s",
+            nickelturn_event_log("NickelTurn: bookmark restore invoked after reflow");
+        } else {
+            nickelturn_event_log("NickelTurn: delayed native anchor restore unavailable; entrypoint is null ContentID=%s",
                                  anchor_content_id.toUtf8().constData());
         }
+    } else {
+        nickelturn_event_log("NickelTurn: delayed native anchor restore canceled; reader state changed ContentID=%s",
+                             anchor_content_id.toUtf8().constData());
     }
 }
 
@@ -952,7 +906,10 @@ static void processNickelMenuToggleRequest() {
     const ActiveReaderState state = snapshotActiveReaderState();
     if (state.content_id.isEmpty() || state.source_mode == SourceModeUnknown ||
         state.webkit_view == nullptr) {
-        nickelturn_event_log("NickelTurn: toggle ignored; active KEPUB layout is not ready");
+        nickelturn_event_log("NickelTurn: toggle ignored; active KEPUB layout is not ready ContentID=%s source-mode=%s webkit-view-present=%d",
+                             state.content_id.toUtf8().constData(),
+                             sourceModeName(state.source_mode),
+                             state.webkit_view == nullptr ? 0 : 1);
         return;
     }
     const QByteArray content_id_utf8 = state.content_id.toUtf8();
@@ -968,7 +925,8 @@ static void processNickelMenuToggleRequest() {
     }
     void *custom_web_view = g_native_kepub_api.web_view(state.webkit_view);
     if (custom_web_view == nullptr) {
-        nickelturn_event_log("NickelTurn JSON updated but active CustomWebView is unavailable ContentID=%s", content_id_utf8.constData());
+        nickelturn_event_log("NickelTurn: active CustomWebView is unavailable; layout unchanged ContentID=%s",
+                             content_id_utf8.constData());
         return;
     }
     BookmarkStorage captured_bookmark;
@@ -979,8 +937,6 @@ static void processNickelMenuToggleRequest() {
                              content_id_utf8.constData());
         return;
     }
-    nickelturn_event_log("NickelTurn: captured current native Bookmark before reflow ContentID=%s",
-                         content_id_utf8.constData());
     const bool vertical = strcmp(target_mode, "vertical-rl") == 0;
     beginCssHandoffDiagnostic(current_mode);
     g_native_kepub_api.set_writing_direction(state.webkit_view, vertical ? 3 : 0);
@@ -1001,16 +957,14 @@ static void processNickelMenuToggleRequest() {
     g_pending_native_anchor_generation = state.direction_generation;
     // reloadChapter 回傳時 replacement DOM 尚未完成；四個 tick 留出完整一秒等待。
     g_pending_native_anchor_ticks = 4u;
-    nickelturn_event_log("NickelTurn: copied current Bookmark; delayed native anchor restore scheduled ContentID=%s",
+    nickelturn_event_log("NickelTurn: source-mode=%s from=%s to=%s ContentID=%s; preference saved and native reflow requested",
+                         sourceModeName(state.source_mode), current_mode, target_mode,
                          content_id_utf8.constData());
-    nickelturn_event_log("NickelTurn: toggled from=%s to=%s ContentID=%s; native writing, progression, CSS rebuild, and chapter reload requested", current_mode, target_mode, content_id_utf8.constData());
 }
 
 // 每 250ms 在 Qt 主執行緒處理延後工作與已收到的切換請求。
 static void processNickelTurnTimer() {
     processPendingHorizontalSourceMode();
-    processPendingActiveContentDiagnostic();
-    processPendingSourceModeDiagnostic();
     processPendingNativeAnchorRestore();
     processCssHandoffDiagnostic();
     if (g_nickelmenu_toggle_requested == 0)
@@ -1020,22 +974,26 @@ static void processNickelTurnTimer() {
 }
 
 // 建立 NickelMenu 選項與 signal script，並啟動 Qt 主事件迴圈的切換處理。
-static void installNickelMenuBridge() {
-    ensureNickelTurnDirectories();
-    ensureNickelTurnToggleScript();
+static bool installNickelMenuBridge() {
+    if (!ensureNickelTurnDirectories())
+        return false;
     if (!installNickelTurnToggleSignalHandler())
-        return;
+        return false;
     QCoreApplication *app = QCoreApplication::instance();
     if (app == nullptr) {
         nickelturn_event_log("NickelTurn Qt application unavailable; NickelMenu bridge disabled");
-        return;
+        return false;
     }
     g_nickelmenu_toggle_timer = new QTimer(app);
     g_nickelmenu_toggle_timer->setInterval(250);
     QObject::connect(g_nickelmenu_toggle_timer, &QTimer::timeout, processNickelTurnTimer);
     g_nickelmenu_toggle_timer->start();
-    markNickelTurnReady();
-    nickelturn_event_log("NickelTurn: NickelMenu reader action bridge installed");
+    if (!markNickelTurnReady()) {
+        g_nickelmenu_toggle_timer->stop();
+        g_nickelmenu_toggle_timer = nullptr;
+        return false;
+    }
+    return true;
 }
 
 // Hook KEPUB CSS 交接點；命中 JSON 模式時才附加直排或橫排 CSS。
@@ -1071,9 +1029,13 @@ extern "C" void NickelTurnWebkitAddCssToHtml(void *webkit_view, QString css) {
 
 // 在 Nickel 啟動時驗證所有實際使用的 firmware symbol／offset，再啟用功能。
 extern "C" int nickelturn_initialize(void) {
+    nickelturn_event_log("NickelTurn: firmware profile=%s Build ID=%s",
+                         kFirmwareVersion, kFirmwareBuildId);
     // 每次啟動都先撤銷舊 ready marker。只要新版 firmware 讓 guard 失敗，舊版 script
     // 就會安全失敗並由 NickelMenu 顯示錯誤，不會向沒有 handler 的 Nickel 發送 SIGUSR1。
-    (void)unlink(kNickelTurnReadyFlag);
+    if (unlink(kNickelTurnReadyFlag) != 0 && errno != ENOENT) {
+        nickelturn_event_log("NickelTurn: cannot clear stale ready marker error=%s", strerror(errno));
+    }
     void *const required_symbols[] = {
         nickelturn_original_webkit_add_css_to_html,
         nickelturn_kepub_add_css_to_html,
@@ -1094,7 +1056,20 @@ extern "C" int nickelturn_initialize(void) {
         nickelturn_kepub_set_writing_direction,
         nickelturn_webkit_set_writing_direction,
     };
+    const char *const required_symbol_names[] = {
+        "WebkitView::addCssToHtml", "KepubBookReader::addCssToHtml",
+        "KepubBookReaderBase::updateHtmlCss", "KepubBookReaderBase::reloadChapter",
+        "WebkitView::webView", "CustomWebView::setPageProgressionDirection",
+        "ReadingView::leftToRightPageProgressDirection",
+        "KepubBookReaderBase::bookmarkForCurrentLocation",
+        "Bookmark shared-data destructor", "ScObject destructor",
+        "KepubBookReaderBase::goToBookmarkAnchor", "Bookmark shared-data assignment",
+        "Content::getBookId", "Content::getBookId KEPUB caller guard",
+        "KepubBookReader::renderShortcover", "WebkitView::setWritingDirection original",
+        "KepubBookReader::setWritingDirection", "WebkitView::setWritingDirection KEPUB caller guard",
+    };
     if (!areRequiredSymbolsAvailable(required_symbols,
+                                     required_symbol_names,
                                      sizeof(required_symbols) / sizeof(required_symbols[0]))) {
         return 1;
     }
@@ -1155,14 +1130,13 @@ extern "C" int nickelturn_initialize(void) {
     g_native_kepub_api.assign_bookmark_shared_data =
         reinterpret_cast<BookmarkSharedDataAssignFn>(nickelturn_bookmark_shared_data_assign);
     if (!isNativeKepubApiReady()) {
-        nickelturn_event_log("NickelTurn: native API conversion failed");
         return 1;
     }
 
     g_firmware_matches = true;
-    nickelturn_event_log("NickelTurn: beginning mode-cache initialization");
     parseModeJsonAtInit();
-    installNickelMenuBridge();
-    nickelturn_event_log("NickelTurn: firmware guard passed; full KEPUB toggle profile enabled");
+    if (installNickelMenuBridge()) {
+        nickelturn_event_log("NickelTurn: initialization complete; firmware guard passed and menu bridge ready");
+    }
     return 0;
 }

@@ -1,4 +1,4 @@
 # Managed by NickelTurn.
 experimental:menu_main_15505_enabled:0
-menu_item:reader:直橫排互換:cmd_output:1000:quiet:/mnt/onboard/.adds/nickel-turn/nickelturn-toggle
-chain_failure:dbg_error:NickelTurn 無法啟用：firmware 不支援或初始化失敗
+menu_item:reader:直橫排互換:cmd_output:6000:quiet:/bin/sh /mnt/onboard/.adds/nickel-turn/nickelturn-toggle
+chain_failure:dbg_error:NickelTurn 尚未就緒：韌體不支援或初始化尚未完成
