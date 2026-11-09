@@ -20,3 +20,5 @@ const uintptr_t kKepubSetWritingDirectionOffset = 0x00fb12ecu;
 const uintptr_t kKepubSetWritingDirectionSize = 0x00000054u;
 const uintptr_t kWebkitSetWritingDirectionOffset = 0x00bd12a8u;
 const uintptr_t kCustomSetPageProgressionDirectionOffset = 0x00bc9924u;
+// ReadingMenuView constructor, verified in the supplied firmware ELF.
+const uintptr_t kReadingMenuViewConstructorOffset = 0x00fcdf40u;

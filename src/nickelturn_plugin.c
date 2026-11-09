@@ -23,6 +23,12 @@ extern void *nickelturn_kepub_render_shortcover;
 extern void *nickelturn_original_webkit_set_writing_direction;
 extern void *nickelturn_kepub_set_writing_direction;
 extern void *nickelturn_webkit_set_writing_direction;
+extern void *nickelturn_original_reading_menu_view_constructor;
+extern void *nickelturn_reading_menu_view_font_button;
+extern void *nickelturn_reading_menu_view_stats_button;
+extern void *nickelturn_touch_label_constructor;
+extern void *nickelturn_touch_label_set_deselected_pixmap;
+extern void *nickelturn_touch_label_set_selected_pixmap;
 
 static struct nh_info NickelTurn = {
     .name = "NickelTurn",
@@ -64,10 +70,47 @@ static struct nh_hook NickelTurnHook[] = {
         .out = &nickelturn_original_reading_view_left_to_right_page_progress_direction,
         .desc = "NickelTurn active KEPUB swipe page-progression override",
     },
+    {
+        .sym = "_ZN15ReadingMenuViewC1EP7QWidgetRK10QByteArrayb",
+        .sym_new = "NickelTurnReadingMenuViewConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_reading_menu_view_constructor,
+        .desc = "NickelTurn reader toolbar button",
+    },
     {0},
 };
 
 static struct nh_dlsym NickelTurnDlsym[] = {
+    {
+        .name = "_ZNK15ReadingMenuView10fontButtonEv",
+        .out = &nickelturn_reading_menu_view_font_button,
+        .desc = "ReadingMenuView native font button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK15ReadingMenuView11statsButtonEv",
+        .out = &nickelturn_reading_menu_view_stats_button,
+        .desc = "ReadingMenuView native stats button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZN10TouchLabelC1EP7QWidget6QFlagsIN2Qt10WindowTypeEE",
+        .out = &nickelturn_touch_label_constructor,
+        .desc = "Kobo TouchLabel constructor for reader toolbar tap control",
+        .optional = true,
+    },
+    {
+        .name = "_ZN10TouchLabel19setDeselectedPixmapERK7QPixmap",
+        .out = &nickelturn_touch_label_set_deselected_pixmap,
+        .desc = "Kobo TouchLabel normal icon setter",
+        .optional = true,
+    },
+    {
+        .name = "_ZN10TouchLabel17setSelectedPixmapERK7QPixmap",
+        .out = &nickelturn_touch_label_set_selected_pixmap,
+        .desc = "Kobo TouchLabel selected icon setter",
+        .optional = true,
+    },
     {
         .name = "_ZN15KepubBookReader12addCssToHtmlE7QString",
         .out = &nickelturn_kepub_add_css_to_html,

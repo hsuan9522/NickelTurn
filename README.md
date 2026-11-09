@@ -2,7 +2,7 @@
 
 NickelTurn 是一項**實驗性功能**，建議安裝前先備份閱讀器，並自行承擔使用風險。
 本專案讓 Kobo 閱讀器使用者在閱讀時切換直排與橫排，目前僅支援 `KEPUB` 格式。安裝後，
-NickelMenu 的閱讀器選單會出現 **直橫排互換** 按鈕。
+閱讀工具列會出現 **直橫** 按鈕，可在閱讀時切換直排與橫排。
 
 目前版本主要以 Clara BW 實機測試。先前曾在 Libra Colour 上測試，但後續版本未必有在該機種
 重新驗證，因此無法保證相容。
@@ -58,10 +58,11 @@ docker run --platform linux/amd64 --volume="$PWD:/work" --user="$(id -u):$(id -g
 
 ## 使用方式
 
-NickelTurn 的 NickelMenu 設定檔已包在 `KoboRoot.tgz` 中，安裝位置為 `.adds/nm/nickelturn`；
-使用前也必須先安裝 NickelMenu。NickelTurn 啟動時不會重新建立或覆寫這個檔案，因此手動修改或刪除
-後，變更會在重新啟動後保留。重新安裝或升級套件時，則會再次安裝套件內附的預設設定檔。開啟一本
-KEPUB，進入 NickelMenu 的閱讀器選單，再選擇 **直橫排互換**。
+NickelTurn 不需要安裝 NickelMenu。開啟 KEPUB 後，點一下頁面叫出閱讀工具列，按下 **直橫** 即可切換
+直排與橫排。
+
+升級舊版時，安裝包會以空白註解設定取代 NickelTurn 先前使用的 NickelMenu 選單設定，避免閱讀工具列
+按鈕與舊選單項目重複。若你仍使用 NickelMenu，它不會影響 NickelTurn 的工具列按鈕。
 
 選擇的排版模式會儲存在：
 
@@ -90,7 +91,7 @@ JSON 使用 Kobo 原始的 `ContentID` 值作為索引，不會正規化 `file:/
 logread | grep NickelTurn | tail -n 120
 ```
 
-重要的初始化與選單操作事件也會寫入以下檔案：
+重要的初始化與工具列操作事件也會寫入以下檔案：
 
 ```text
 /mnt/onboard/.adds/nickel-turn/nickel-turn.log
@@ -100,7 +101,7 @@ logread | grep NickelTurn | tail -n 120
 
 - NickelHook 的 20 秒 failsafe 保持啟用。若啟動失敗，程式庫會被標記為 `.failsafe`，避免下次開機再次載入。
 - 初始化讀取 JSON 時只開啟一次，解析到有容量上限的記憶體 POD 快取（檔案最多 1 MiB、最多 8192 筆）後立即關閉檔案。
-- JSON 只會由 NickelMenu signal 的 Qt timer handler 寫入，流程為 write → `fsync` → close → rename；
+- JSON 只會由 Qt timer 或工具列按鈕的 Qt signal handler 寫入，流程為 write → `fsync` → close → rename；
   不會讓使用者儲存區的檔案描述符持續開啟。
 - CSS 與 reader hook 不會進行檔案 I/O；只在目前 KEPUB 的呼叫流程中執行有限工作，並使用快取的模式資料。
 - 程式碼使用 Qt／C API，不使用 C++ 標準函式庫。
