@@ -30,8 +30,10 @@ else
 $(error NT_BUILD must be smoke or full)
 endif
 
+.PHONY: print-firmware-list
+override SKIPCONFIGURE += print-firmware-list
+
 include NickelHook/NickelHook.mk
 
-.PHONY: print-firmware-list
 print-firmware-list:
 	@printf '%s\n' $(NT_SUPPORTED_FIRMWARES)
