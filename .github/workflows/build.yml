@@ -2,10 +2,7 @@ name: Build KoboRoot
 
 on:
   push:
-    branches: [master]
     tags: ["v*"]
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,21 +15,26 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: List firmware profiles
         id: list
         run: |
           python3 - <<'PY'
           import json
           import os
-          import subprocess
+          import re
 
-          profiles = subprocess.check_output(
-              ["make", "-s", "print-firmware-list"], text=True
-          ).split()
+          with open("config/firmware.mk", encoding="utf-8") as config:
+              firmware_line = next(
+                  (line for line in config if line.startswith("NT_SUPPORTED_FIRMWARES")),
+                  "",
+              )
+          profiles = firmware_line.split(":=", 1)[-1].split()
           if not profiles:
               raise SystemExit("No firmware versions configured in config/firmware.mk")
+          if any(not re.fullmatch(r"\d+\.\d+\.\d+", item) for item in profiles):
+              raise SystemExit("Invalid firmware version in config/firmware.mk")
+          if len(profiles) != len(set(profiles)):
+              raise SystemExit("Duplicate firmware version in config/firmware.mk")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("firmware=" + json.dumps(profiles) + "\n")
           PY
