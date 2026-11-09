@@ -61,8 +61,9 @@ docker run --platform linux/amd64 --volume="$PWD:/work" --user="$(id -u):$(id -g
 NickelTurn 不需要安裝 NickelMenu。開啟 KEPUB 後，點一下頁面叫出閱讀工具列，按下 **直橫** 即可切換
 直排與橫排。
 
-升級舊版時，安裝包會以空白註解設定取代 NickelTurn 先前使用的 NickelMenu 選單設定，避免閱讀工具列
-按鈕與舊選單項目重複。若你仍使用 NickelMenu，它不會影響 NickelTurn 的工具列按鈕。
+升級舊版時，NickelTurn 初始化會清除先前留下的 `.adds/nm/nickelturn` 設定、切換 script 和 ready marker。
+清理只針對 NickelTurn 自己的舊檔，不會移除 NickelMenu 或其他 NickelMenu 設定；使用者的
+`book-modes.json` 也會保留。
 
 選擇的排版模式會儲存在：
 

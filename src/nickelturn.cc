@@ -916,6 +916,15 @@ static bool ensureNickelTurnDirectories() {
     return true;
 }
 
+static void removeLegacyNickelMenuArtifact(const char *path, const char *name) {
+    if (unlink(path) == 0) {
+        nickelturn_event_log("NickelTurn: removed legacy NickelMenu %s", name);
+    } else if (errno != ENOENT) {
+        nickelturn_event_log("NickelTurn: cannot remove legacy NickelMenu %s error=%s",
+                             name, strerror(errno));
+    }
+}
+
 // 在延後時間到達時，將尚未收到方向 setter 的書籍確定為原始橫排。
 static void processPendingHorizontalSourceMode() {
     if (g_pending_horizontal_ticks == 0u || --g_pending_horizontal_ticks != 0u)
@@ -1357,10 +1366,10 @@ extern "C" void NickelTurnWebkitAddCssToHtml(void *webkit_view, QString css) {
 extern "C" int nickelturn_initialize(void) {
     nickelturn_event_log("NickelTurn: firmware profile=%s Build ID=%s",
                          kFirmwareVersion, kFirmwareBuildId);
-    // 清除舊版 NickelMenu bridge 留下的 marker。
-    if (unlink(kNickelTurnReadyFlag) != 0 && errno != ENOENT) {
-        nickelturn_event_log("NickelTurn: cannot clear stale ready marker error=%s", strerror(errno));
-    }
+    // 移除舊版 NickelMenu 整合留下的 NickelTurn 專屬檔案。
+    removeLegacyNickelMenuArtifact(kNickelTurnNickelMenuConfig, "config");
+    removeLegacyNickelMenuArtifact(kNickelTurnToggleScript, "toggle script");
+    removeLegacyNickelMenuArtifact(kNickelTurnReadyFlag, "ready marker");
     void *const required_symbols[] = {
         nickelturn_original_webkit_add_css_to_html,
         nickelturn_kepub_add_css_to_html,

@@ -6,7 +6,6 @@ override SOURCES += src/nickelturn_log.c
 override PKGCONF += Qt5Widgets
 override CFLAGS += -Wall -Wextra -Werror
 override CXXFLAGS += -Wall -Wextra -Werror -Wno-missing-field-initializers
-override KOBOROOT += config/nickelturn:/mnt/onboard/.adds/nm/nickelturn
 
 NT_FIRMWARE_PROFILE := src/firmware_profiles/$(NT_FIRMWARE).h
 ifeq ($(filter $(NT_FIRMWARE),$(NT_SUPPORTED_FIRMWARES)),)
