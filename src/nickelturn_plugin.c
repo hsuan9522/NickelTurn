@@ -24,8 +24,13 @@ extern void *nickelturn_original_webkit_set_writing_direction;
 extern void *nickelturn_kepub_set_writing_direction;
 extern void *nickelturn_webkit_set_writing_direction;
 extern void *nickelturn_original_reading_menu_view_constructor;
+extern void *nickelturn_original_quick_turn_event_filter_constructor;
+extern void *nickelturn_reading_view_left_to_right_writing_direction;
 extern void *nickelturn_reading_menu_view_font_button;
 extern void *nickelturn_reading_menu_view_stats_button;
+extern void *nickelturn_original_breadcrumb_slider_constructor;
+extern void *nickelturn_breadcrumb_slider_set_thick_line_enabled;
+extern void *nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled;
 extern void *nickelturn_touch_label_constructor;
 extern void *nickelturn_touch_label_set_deselected_pixmap;
 extern void *nickelturn_touch_label_set_selected_pixmap;
@@ -77,6 +82,21 @@ static struct nh_hook NickelTurnHook[] = {
         .out = &nickelturn_original_reading_menu_view_constructor,
         .desc = "NickelTurn reader toolbar button",
     },
+    {
+        .sym = "_ZN20QuickTurnEventFilterC1EP17QuickTurnDelegateP7QWidgetP15QuickTurnSliderib",
+        .sym_new = "NickelTurnQuickTurnEventFilterConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_quick_turn_event_filter_constructor,
+        .desc = "NickelTurn active ReadingView direction lookup",
+    },
+    {
+        .sym = "_ZN16BreadcrumbSliderC1EP7QWidget",
+        .sym_new = "NickelTurnBreadcrumbSliderConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_breadcrumb_slider_constructor,
+        .desc = "NickelTurn reading menu scrubber style synchronization",
+        .optional = true,
+    },
     {0},
 };
 
@@ -91,6 +111,24 @@ static struct nh_dlsym NickelTurnDlsym[] = {
         .name = "_ZNK15ReadingMenuView11statsButtonEv",
         .out = &nickelturn_reading_menu_view_stats_button,
         .desc = "ReadingMenuView native stats button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZN11TouchSlider19setThickLineEnabledEb",
+        .out = &nickelturn_breadcrumb_slider_set_thick_line_enabled,
+        .desc = "BreadcrumbSlider filled line direction state",
+        .optional = true,
+    },
+    {
+        .name = "_ZN11TouchSlider26setInverseThickLineEnabledEb",
+        .out = &nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled,
+        .desc = "BreadcrumbSlider inverse filled line direction state",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK11ReadingView27leftToRightWritingDirectionEv",
+        .out = &nickelturn_reading_view_left_to_right_writing_direction,
+        .desc = "ReadingView effective page progression direction",
         .optional = true,
     },
     {
