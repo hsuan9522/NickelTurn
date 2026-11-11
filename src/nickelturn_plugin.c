@@ -39,6 +39,7 @@ extern void *nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled;
 extern void *nickelturn_touch_label_constructor;
 extern void *nickelturn_touch_label_set_deselected_pixmap;
 extern void *nickelturn_touch_label_set_selected_pixmap;
+extern void *nickelturn_confirmation_dialog_factory_show_ok_dialog;
 
 static struct nh_info NickelTurn = {
     .name = "NickelTurn",
@@ -114,6 +115,12 @@ static struct nh_hook NickelTurnHook[] = {
 };
 
 static struct nh_dlsym NickelTurnDlsym[] = {
+    {
+        .name = "_ZN25ConfirmationDialogFactory12showOKDialogERK7QStringS2_",
+        .out = &nickelturn_confirmation_dialog_factory_show_ok_dialog,
+        .desc = "Nickel native OK dialog for firmware compatibility warnings",
+        .optional = true,
+    },
     {
         .name = "_ZNK15ReadingMenuView10fontButtonEv",
         .out = &nickelturn_reading_menu_view_font_button,

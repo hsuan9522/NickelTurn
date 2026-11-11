@@ -80,6 +80,7 @@ typedef void (*BreadcrumbSliderConstructorFn)(void *, QWidget *);
 // WritingDirection 在 ARM ABI 中以整數 enum 傳遞及回傳。
 typedef void (*ContentGetBookIdFn)(QString *, const void *);
 typedef void (*WebkitSetWritingDirectionFn)(void *, int);
+typedef void (*ConfirmationDialogFactoryShowOKDialogFn)(const QString &, const QString &);
 
 // 初始化完成後固定不變的 Kobo 原生函式入口，集中管理避免每次切換重複轉型。
 struct NativeKepubApi {
@@ -115,6 +116,7 @@ static unsigned int g_pending_horizontal_ticks = 0;
 
 static uintptr_t g_kepub_add_css_start = 0;
 static bool g_firmware_matches = false;
+static bool g_warning_only_mode = false;
 static uintptr_t g_kepub_render_shortcover_start = 0;
 static uintptr_t g_kepub_set_writing_direction_start = 0;
 static QString g_last_rendered_content_id;
@@ -662,6 +664,7 @@ void *nickelturn_scrubber_controller_next_chapter = nullptr;
 void *nickelturn_touch_label_constructor = nullptr;
 void *nickelturn_touch_label_set_deselected_pixmap = nullptr;
 void *nickelturn_touch_label_set_selected_pixmap = nullptr;
+void *nickelturn_confirmation_dialog_factory_show_ok_dialog = nullptr;
 }
 
 // 從閱讀器建立 QuickTurnEventFilter 時取得目前 ReadingView，供閱讀選單進度條同步原生方向。
@@ -676,6 +679,8 @@ extern "C" void NickelTurnQuickTurnEventFilterConstructor(
         return;
     }
     original(event_filter, delegate, parent, slider, slider_zone_width, constructor_option);
+    if (!g_firmware_matches)
+        return;
     if (parent == nullptr || !parent->inherits("ReadingView"))
         return;
     g_active_reading_view = parent;
@@ -691,6 +696,8 @@ extern "C" void NickelTurnBreadcrumbSliderConstructor(void *slider, QWidget *par
         return;
     }
     original(slider, parent);
+    if (!g_firmware_matches)
+        return;
     QWidget *widget = static_cast<QWidget *>(slider);
     if (widget == nullptr || !widget->inherits("BreadcrumbSlider"))
         return;
@@ -775,7 +782,7 @@ extern "C" void NickelTurnReadingMenuScrubberControllerConstructor(
         return;
     }
     original(controller, reading_view);
-    if (controller == nullptr || reading_view == nullptr)
+    if (!g_firmware_matches || controller == nullptr || reading_view == nullptr)
         return;
 
     QObject *controller_object = static_cast<QObject *>(controller);
@@ -866,6 +873,8 @@ extern "C" void NickelTurnContentGetBookId(QString *result, const void *content)
     }
 
     original(result, content);
+    if (!g_firmware_matches)
+        return;
     if (!wasCalledByKepubRenderShortcover(caller) || result->isEmpty())
         return;
 
@@ -897,6 +906,9 @@ extern "C" bool NickelTurnReadingViewLeftToRightPageProgressDirection(const void
     if (original == nullptr)
         return true;
 
+    if (!g_firmware_matches)
+        return original(reading_view);
+
     const ActiveReaderState state = snapshotActiveReaderState();
 
     char override_mode[16];
@@ -922,6 +934,8 @@ extern "C" void NickelTurnWebkitSetWritingDirection(void *webkit_view, int direc
     }
 
     original(webkit_view, direction);
+    if (!g_firmware_matches)
+        return;
     if (!wasCalledByKepubSetWritingDirection(caller))
         return;
 
@@ -1115,6 +1129,18 @@ static void processNickelTurnToggleRequest() {
 
 // 工具列點擊若剛好早於方向偵測完成，暫存請求讓 Qt timer 在狀態就緒後送出。
 static void handleReaderToolbarToggleClick() {
+    ConfirmationDialogFactoryShowOKDialogFn show_dialog =
+        reinterpret_cast<ConfirmationDialogFactoryShowOKDialogFn>(
+            nickelturn_confirmation_dialog_factory_show_ok_dialog);
+    if (g_warning_only_mode) {
+        if (show_dialog == nullptr) {
+            nickelturn_event_log("NickelTurn: firmware warning dialog API unavailable");
+            return;
+        }
+        show_dialog(QString::fromUtf8("NickelTurn"),
+                    QString::fromUtf8("此韌體版本尚未經 NickelTurn 驗證，排版轉換功能已停用。請確認是否有支援此韌體的 NickelTurn 版本。"));
+        return;
+    }
     const ActiveReaderState state = snapshotActiveReaderState();
     if (state.content_id.isEmpty()) {
         nickelturn_event_log("NickelTurn: toolbar toggle clicked without an active KEPUB");
@@ -1218,8 +1244,15 @@ static ReaderMenuButtonAnchor findReaderMenuButtonAnchor(QWidget *button) {
 
 // 將按鈕插在閱讀工具列的原生控制項旁；先用字體按鈕，沒有時改用統計按鈕。
 static void addReaderToolbarToggleButton(void *reading_menu_view) {
-    if (!g_firmware_matches || reading_menu_view == nullptr)
+    if ((!g_firmware_matches && !g_warning_only_mode) || reading_menu_view == nullptr)
         return;
+    if (g_warning_only_mode && nickelturn_confirmation_dialog_factory_show_ok_dialog == nullptr) {
+        if (!g_reader_toolbar_button_diagnostic_logged) {
+            g_reader_toolbar_button_diagnostic_logged = true;
+            nickelturn_event_log("NickelTurn: unsupported firmware detected; native warning dialog unavailable, toolbar warning button omitted");
+        }
+        return;
+    }
     QWidget *view = reinterpret_cast<QWidget *>(reading_menu_view);
     QWidget *existing = view->findChild<QWidget *>(
         QString::fromLatin1("nickelTurnToggleButton"));
@@ -1298,6 +1331,8 @@ static void addReaderToolbarToggleButton(void *reading_menu_view) {
     if (set_selected_pixmap != nullptr)
         set_selected_pixmap(touch_label_storage, icon_pixmap);
     button->setToolTip(QString::fromUtf8("直橫排互換"));
+    if (g_warning_only_mode)
+        button->setToolTip(QString::fromUtf8("NickelTurn 無法確認此韌體相容性"));
     button->setFocusPolicy(native_button == nullptr ? Qt::NoFocus : native_button->focusPolicy());
     QPushButton *click_shim = new QPushButton(button_parent);
     click_shim->setObjectName(QString::fromLatin1("nickelTurnClickShim"));
@@ -1314,6 +1349,8 @@ static void addReaderToolbarToggleButton(void *reading_menu_view) {
                      []() { handleReaderToolbarToggleClick(); });
     const int anchor_index = anchor.layout->indexOf(anchor.widget);
     anchor.layout->insertWidget(anchor_index + 1, button);
+    if (g_warning_only_mode)
+        button->setVisible(true);
     g_reader_toolbar_toggle_button = button;
 }
 
@@ -1368,12 +1405,17 @@ static bool installNickelTurnRuntime() {
 
 // Hook KEPUB CSS 交接點；命中 JSON 模式時才附加直排或橫排 CSS。
 extern "C" void NickelTurnWebkitAddCssToHtml(void *webkit_view, QString css) {
-    const uintptr_t caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
     WebkitAddCssToHtmlFn original = reinterpret_cast<WebkitAddCssToHtmlFn>(nickelturn_original_webkit_add_css_to_html);
     if (original == nullptr) {
         nickelturn_log("NickelTurn original WebkitView::addCssToHtml pointer missing");
         return;
     }
+
+    if (!g_firmware_matches) {
+        original(webkit_view, css);
+        return;
+    }
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
 
     const bool kepub_caller = wasCalledByKepubCssBuilder(caller);
     if (kepub_caller) {
@@ -1475,7 +1517,9 @@ extern "C" int nickelturn_initialize(void) {
     for (size_t i = 0; i < sizeof(guards) / sizeof(guards[0]); ++i) {
         if (!validateLibnickelOffset(guards[i].symbol, base_info.dli_fbase, guards[i].offset,
                                      guards[i].symbol_name, guards[i].normalized_address)) {
-            return 1;
+            g_warning_only_mode = true;
+            nickelturn_event_log("NickelTurn: unsupported firmware offset profile; entering warning-only mode");
+            return 0;
         }
     }
 
