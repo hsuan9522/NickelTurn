@@ -11,7 +11,7 @@ NickelTurn 是一項**實驗性功能**，建議安裝前先備份閱讀器，�
 
 > [!警告]
 >
-> 絕大部分程式碼由 AI 生成。本功能仍屬實驗性功能，且必須使用相符的韌體版本。
+> 絕大部分程式碼由 AI 生成。本功能仍屬實驗性功能，依賴 Nickel 提供的函式符號與 ABI；韌體若移除或改變必要介面，可能需要更新外掛。
 
 `libnickel.so.1.0.0` 位於韌體中的 `usr/local/Kobo/libnickel.so.1.0.0`。
 
@@ -28,32 +28,18 @@ NickelTurn 是一項**實驗性功能**，建議安裝前先備份閱讀器，�
 | `full` | 預設值 | 提供 KEPUB 直橫排切換、JSON 快取、滑動翻頁方向調整，以及延遲還原原生書籤。 |
 | `smoke` | `NT_BUILD=smoke` | 僅檢查外掛載入與 failsafe，不會變更書籍排版或狀態。 |
 
-## 韌體版本設定
+## 韌體相容性
 
-完整建置目前支援兩個韌體版本。每個版本的 Build ID 與 Nickel 位移值分別存放在
-`src/firmware_profiles/`：
+目前使用單一通用 build，已在 4.45.23697 與 4.46.23852 韌體裝置上交叉測試。
+這些匯出函式不是 Kobo 承諾跨韌體穩定的正式介面；未來韌體若改變必要符號或 ABI，再依實際失效情況調整。
 
-| Kobo 韌體 | Build ID | 建置參數 |
-| --- | --- | --- |
-| `4.45.23697` | `f043a6aed1c782880be5d6075a22619bd8e49dcb` | `NT_FIRMWARE=4.45.23697` |
-| `4.46.23852` | `8515657b0cb4e08354dba85716b3b93e1984e2d5` | `NT_FIRMWARE=4.46.23852` |
-
-`config/firmware.mk` 列出 CI 與 Release 要建置的所有韌體版本，也指定本機建置的預設版本。
-Makefile 會依照 `NT_FIRMWARE` 引入相符的版本設定檔；GitHub Actions 則會為清單中的每個版本
-各建置一份安裝包。新增韌體時，請加入已驗證的版本設定檔，並將版本號加入
-`config/firmware.mk` 的 `NT_SUPPORTED_FIRMWARES`。
-
-在 Linux、macOS 或 WSL 的此目錄執行以下指令，建置一般安裝包：
+在 Linux、macOS、WSL 或 Git Bash 的專案目錄執行以下指令，建置通用安裝包：
 
 ```sh
-docker run --platform linux/amd64 --volume="$PWD:/work" --user="$(id -u):$(id -g)" \
-  --workdir=/work --env=HOME --entrypoint=make --rm \
-  ghcr.io/pgaskin/nickeltc:1.0 clean all koboroot NT_BUILD=full NT_FIRMWARE=4.46.23852
+sh build.sh
 ```
 
-
-目前這會使用與 `config/firmware.mk` 預設值相同的韌體版本 `4.46.23852`。若要指定其他支援版本，
-可設定環境變數。
+可用 `sh build.sh --help` 查看建置說明；目前不需指定韌體版本。
 
 
 ## 使用方式
@@ -107,5 +93,4 @@ logread | grep NickelTurn | tail -n 120
 - CSS 與 reader hook 不會進行檔案 I/O；只在目前 KEPUB 的呼叫流程中執行有限工作，並使用快取的模式資料。
 - 程式碼使用 Qt／C API，不使用 C++ 標準函式庫。
 
-其餘依韌體版本而異的 reader 指標，會在初始化時透過必要 symbol 檢查與精確位移值進行保護。
-只要任一檢查失敗，初始化就會回傳錯誤，讓 NickelHook 還原原始 hooks。
+必要的 Nickel 函式符號會在初始化時檢查；缺少時初始化會回傳錯誤，讓 NickelHook 還原原始 hooks。
