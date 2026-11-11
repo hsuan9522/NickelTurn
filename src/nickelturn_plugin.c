@@ -15,14 +15,30 @@ extern void *nickelturn_original_reading_view_left_to_right_page_progress_direct
 extern void *nickelturn_bookmark_for_current_location;
 extern void *nickelturn_bookmark_shared_data_destructor;
 extern void *nickelturn_scobject_destructor;
-extern void *nickelturn_kepub_go_to_bookmark_anchor;
-extern void *nickelturn_bookmark_shared_data_assign;
+extern void *nickelturn_reading_view_go_to_bookmark;
 extern void *nickelturn_original_content_get_book_id;
 extern void *nickelturn_content_get_book_id;
 extern void *nickelturn_kepub_render_shortcover;
 extern void *nickelturn_original_webkit_set_writing_direction;
 extern void *nickelturn_kepub_set_writing_direction;
 extern void *nickelturn_webkit_set_writing_direction;
+extern void *nickelturn_original_reading_menu_view_constructor;
+extern void *nickelturn_original_quick_turn_event_filter_constructor;
+extern void *nickelturn_reading_view_left_to_right_writing_direction;
+extern void *nickelturn_reading_menu_view_font_button;
+extern void *nickelturn_reading_menu_view_stats_button;
+extern void *nickelturn_original_breadcrumb_slider_constructor;
+extern void *nickelturn_original_reading_menu_scrubber_controller_constructor;
+extern void *nickelturn_scrubber_view_left_button;
+extern void *nickelturn_scrubber_view_right_button;
+extern void *nickelturn_scrubber_controller_prev_chapter;
+extern void *nickelturn_scrubber_controller_next_chapter;
+extern void *nickelturn_breadcrumb_slider_set_thick_line_enabled;
+extern void *nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled;
+extern void *nickelturn_touch_label_constructor;
+extern void *nickelturn_touch_label_set_deselected_pixmap;
+extern void *nickelturn_touch_label_set_selected_pixmap;
+extern void *nickelturn_confirmation_dialog_factory_show_ok_dialog;
 
 static struct nh_info NickelTurn = {
     .name = "NickelTurn",
@@ -35,7 +51,7 @@ static struct nh_info NickelTurn = {
 static struct nh_hook NickelTurnHook[] = {
     // ！！韌體升級檢查點：NickelHook 以這些 mangled symbol 名稱解析／替換函式。
     // 新版若改名、移除或改變 hook ABI，需依新 libnickel 更新名稱與實作，
-    // 並同步檢查 nickelturn.cc 的 dlsym 清單、offset guard 和函式型別。
+    // 並同步檢查 nickelturn.cc 的 dlsym 清單、caller guard 和函式型別。
     {
         .sym = "_ZN10WebkitView12addCssToHtmlE7QString",
         .sym_new = "NickelTurnWebkitAddCssToHtml",
@@ -64,14 +80,121 @@ static struct nh_hook NickelTurnHook[] = {
         .out = &nickelturn_original_reading_view_left_to_right_page_progress_direction,
         .desc = "NickelTurn active KEPUB swipe page-progression override",
     },
+    {
+        .sym = "_ZN15ReadingMenuViewC1EP7QWidgetRK10QByteArrayb",
+        .sym_new = "NickelTurnReadingMenuViewConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_reading_menu_view_constructor,
+        .desc = "NickelTurn reader toolbar button",
+    },
+    {
+        .sym = "_ZN20QuickTurnEventFilterC1EP17QuickTurnDelegateP7QWidgetP15QuickTurnSliderib",
+        .sym_new = "NickelTurnQuickTurnEventFilterConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_quick_turn_event_filter_constructor,
+        .desc = "NickelTurn active ReadingView direction lookup",
+    },
+    {
+        .sym = "_ZN16BreadcrumbSliderC1EP7QWidget",
+        .sym_new = "NickelTurnBreadcrumbSliderConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_breadcrumb_slider_constructor,
+        .desc = "NickelTurn reading menu scrubber style synchronization",
+        .optional = true,
+    },
+    {
+        .sym = "_ZN29ReadingMenuScrubberControllerC1EP11ReadingView",
+        .sym_new = "NickelTurnReadingMenuScrubberControllerConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_reading_menu_scrubber_controller_constructor,
+        .desc = "NickelTurn progress-bar chapter button routing",
+        .optional = true,
+    },
     {0},
 };
 
 static struct nh_dlsym NickelTurnDlsym[] = {
     {
+        .name = "_ZN25ConfirmationDialogFactory12showOKDialogERK7QStringS2_",
+        .out = &nickelturn_confirmation_dialog_factory_show_ok_dialog,
+        .desc = "Nickel native OK dialog for user notifications",
+    },
+    {
+        .name = "_ZNK15ReadingMenuView10fontButtonEv",
+        .out = &nickelturn_reading_menu_view_font_button,
+        .desc = "ReadingMenuView native font button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK15ReadingMenuView11statsButtonEv",
+        .out = &nickelturn_reading_menu_view_stats_button,
+        .desc = "ReadingMenuView native stats button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZN11TouchSlider19setThickLineEnabledEb",
+        .out = &nickelturn_breadcrumb_slider_set_thick_line_enabled,
+        .desc = "BreadcrumbSlider filled line direction state",
+        .optional = true,
+    },
+    {
+        .name = "_ZN11TouchSlider26setInverseThickLineEnabledEb",
+        .out = &nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled,
+        .desc = "BreadcrumbSlider inverse filled line direction state",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK11ReadingView27leftToRightWritingDirectionEv",
+        .out = &nickelturn_reading_view_left_to_right_writing_direction,
+        .desc = "ReadingView effective page progression direction",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK23ReadingMenuScrubberView4leftEv",
+        .out = &nickelturn_scrubber_view_left_button,
+        .desc = "ReadingMenuScrubberView chapter-left button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK23ReadingMenuScrubberView5rightEv",
+        .out = &nickelturn_scrubber_view_right_button,
+        .desc = "ReadingMenuScrubberView chapter-right button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZN29ReadingMenuScrubberController11prevChapterEv",
+        .out = &nickelturn_scrubber_controller_prev_chapter,
+        .desc = "ReadingMenuScrubberController native previous-chapter action",
+        .optional = true,
+    },
+    {
+        .name = "_ZN29ReadingMenuScrubberController11nextChapterEv",
+        .out = &nickelturn_scrubber_controller_next_chapter,
+        .desc = "ReadingMenuScrubberController native next-chapter action",
+        .optional = true,
+    },
+    {
+        .name = "_ZN10TouchLabelC1EP7QWidget6QFlagsIN2Qt10WindowTypeEE",
+        .out = &nickelturn_touch_label_constructor,
+        .desc = "Kobo TouchLabel constructor for reader toolbar tap control",
+        .optional = true,
+    },
+    {
+        .name = "_ZN10TouchLabel19setDeselectedPixmapERK7QPixmap",
+        .out = &nickelturn_touch_label_set_deselected_pixmap,
+        .desc = "Kobo TouchLabel normal icon setter",
+        .optional = true,
+    },
+    {
+        .name = "_ZN10TouchLabel17setSelectedPixmapERK7QPixmap",
+        .out = &nickelturn_touch_label_set_selected_pixmap,
+        .desc = "Kobo TouchLabel selected icon setter",
+        .optional = true,
+    },
+    {
         .name = "_ZN15KepubBookReader12addCssToHtmlE7QString",
         .out = &nickelturn_kepub_add_css_to_html,
-        .desc = "NickelTurn firmware guard",
+        .desc = "NickelTurn KEPUB CSS caller symbol",
     },
     {
         .name = "_ZN19KepubBookReaderBase13updateHtmlCssEv",
@@ -97,26 +220,25 @@ static struct nh_dlsym NickelTurnDlsym[] = {
         .name = "_ZN19KepubBookReaderBase26bookmarkForCurrentLocationEv",
         .out = &nickelturn_bookmark_for_current_location,
         .desc = "NickelTurn current KEPUB text anchor capture",
+        .optional = true,
     },
     {
         .name = "_ZN18QSharedDataPointerI15BookmarkPrivateED1Ev",
         .out = &nickelturn_bookmark_shared_data_destructor,
         .desc = "NickelTurn captured Bookmark cleanup",
+        .optional = true,
     },
     {
         .name = "_ZN8ScObjectD1Ev",
         .out = &nickelturn_scobject_destructor,
         .desc = "NickelTurn captured Bookmark base cleanup",
+        .optional = true,
     },
     {
-        .name = "_ZN19KepubBookReaderBase18goToBookmarkAnchorEv",
-        .out = &nickelturn_kepub_go_to_bookmark_anchor,
-        .desc = "NickelTurn native KEPUB bookmark-anchor restore",
-    },
-    {
-        .name = "_ZN18QSharedDataPointerI15BookmarkPrivateEaSERKS1_",
-        .out = &nickelturn_bookmark_shared_data_assign,
-        .desc = "NickelTurn copy current Bookmark into KEPUB reader",
+        .name = "_ZN11ReadingView12goToBookmarkERK8Bookmark",
+        .out = &nickelturn_reading_view_go_to_bookmark,
+        .desc = "NickelTurn ReadingView bookmark navigation",
+        .optional = true,
     },
     {
         .name = "_ZN15KepubBookReader16renderShortcoverERK10Shortcover21ReadingNavigationType",
@@ -126,7 +248,7 @@ static struct nh_dlsym NickelTurnDlsym[] = {
     {
         .name = "_ZNK7Content9getBookIdEv",
         .out = &nickelturn_content_get_book_id,
-        .desc = "NickelTurn ContentID firmware guard",
+        .desc = "NickelTurn ContentID caller symbol",
     },
     {
         .name = "_ZN15KepubBookReader19setWritingDirectionE16WritingDirection",
@@ -136,7 +258,7 @@ static struct nh_dlsym NickelTurnDlsym[] = {
     {
         .name = "_ZN10WebkitView19setWritingDirectionE16WritingDirection",
         .out = &nickelturn_webkit_set_writing_direction,
-        .desc = "NickelTurn WebkitView direction setter firmware guard",
+        .desc = "NickelTurn WebkitView direction caller symbol",
     },
     {0},
 };

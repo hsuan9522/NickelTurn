@@ -10,7 +10,6 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <signal.h>
 #include <sys/stat.h>
 #include <ctime>
 #include <unistd.h>
@@ -23,21 +22,56 @@
 #include <QtCore/QJsonParseError>
 #include <QtCore/QJsonValue>
 #include <QtCore/QObject>
+#include <QtCore/QPointer>
+#include <QtCore/QPointF>
+#include <QtCore/QRegularExpression>
+#include <QtCore/QRectF>
+#include <QtCore/QSize>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QTimer>
+#include <QtCore/QVariant>
+#include <QtGui/QIcon>
+#include <QtGui/QPalette>
+#include <QtGui/QPainter>
+#include <QtGui/QPen>
+#include <QtGui/QPixmap>
+#include <QtWidgets/QAbstractButton>
+#include <QtWidgets/QBoxLayout>
+#include <QtWidgets/QLabel>
+#include <QtWidgets/QLayout>
+#include <QtWidgets/QPushButton>
+#include <QtWidgets/QStyle>
+#include <QtWidgets/QWidget>
 
 #include <NickelHook.h>
 #include "nickelturn_log.h"
+#include "nickelturn_chapter_route.h"
 
 // 此處不可引入或連結 QtWebKit。NickelTC 沒有 WebKit 開發用的 pkg-config
 // 資訊；但 WebkitView::addCssToHtml 以值傳遞 QString，因此仍需要 QtCore。
 
-namespace {
+extern "C" {
+extern void *nickelturn_kepub_add_css_to_html;
+extern void *nickelturn_kepub_render_shortcover;
+extern void *nickelturn_kepub_set_writing_direction;
+}
 
-#ifndef NT_FIRMWARE_PROFILE_HEADER
-#error "The Makefile must select NT_FIRMWARE_PROFILE_HEADER"
-#endif
-#include NT_FIRMWARE_PROFILE_HEADER
+static void showNickelTurnDialog(const QString &message);
+static void queueNickelTurnDialog(const char *message);
+
+struct DialogMessages {
+    const char *firmware;
+    const char *bookmark;
+    const char *switch_failed;
+};
+
+static const DialogMessages kDialogMessages = {
+    "此韌體與 NickelTurn 不相容，無法切換排版。",
+    "排版轉換已成功，但此韌體無法還原切換前的書籍位置。",
+    "切換失敗，請查看 nickel-turn.log。",
+};
+
+namespace {
 
 // ！！下列型別描述 libnickel 的私有 C++/ARM ABI。新版函式即使同名且 offset 可更新，
 // 參數、回傳值、this 指標或 Qt 型別傳遞方式變動時，也必須在此及呼叫點一起更新。
@@ -52,11 +86,15 @@ typedef void (*CustomSetPageProgressionDirectionFn)(void *, const QByteArray &);
 struct BookmarkStorage { uint32_t words[4]; };
 typedef void (*BookmarkForCurrentLocationFn)(BookmarkStorage *, void *);
 typedef void (*BookmarkStorageDestructorFn)(void *);
-typedef void (*KepubGoToBookmarkAnchorFn)(void *);
-typedef void *(*BookmarkSharedDataAssignFn)(void *, const void *);
+typedef bool (*ReadingViewGoToBookmarkFn)(void *, const BookmarkStorage *);
+typedef void (*QuickTurnEventFilterConstructorFn)(void *, void *, void *, void *, int, bool);
+typedef void (*TouchSliderFlagSetterFn)(void *, bool);
+typedef bool (*ReadingViewLeftToRightWritingDirectionFn)(const void *);
+typedef void (*BreadcrumbSliderConstructorFn)(void *, QWidget *);
 // WritingDirection 在 ARM ABI 中以整數 enum 傳遞及回傳。
 typedef void (*ContentGetBookIdFn)(QString *, const void *);
 typedef void (*WebkitSetWritingDirectionFn)(void *, int);
+typedef void (*ConfirmationDialogFactoryShowOKDialogFn)(const QString &, const QString &);
 
 // 初始化完成後固定不變的 Kobo 原生函式入口，集中管理避免每次切換重複轉型。
 struct NativeKepubApi {
@@ -66,17 +104,22 @@ struct NativeKepubApi {
     WebkitWebViewFn web_view;
     CustomSetPageProgressionDirectionFn set_page_progression;
     BookmarkForCurrentLocationFn bookmark_for_current_location;
+    ReadingViewGoToBookmarkFn reading_view_go_to_bookmark;
     BookmarkStorageDestructorFn destroy_bookmark_shared_data;
     BookmarkStorageDestructorFn destroy_scobject;
-    KepubGoToBookmarkAnchorFn go_to_bookmark_anchor;
-    BookmarkSharedDataAssignFn assign_bookmark_shared_data;
 };
 static NativeKepubApi g_native_kepub_api = {};
 const char kNickelTurnNickelMenuConfig[] = "/mnt/onboard/.adds/nm/nickelturn";
 const char kNickelTurnToggleScript[] = "/mnt/onboard/.adds/nickel-turn/nickelturn-toggle";
 const char kNickelTurnReadyFlag[] = "/mnt/onboard/.adds/nickel-turn/ready";
-static volatile sig_atomic_t g_nickelmenu_toggle_requested = 0;
-static QTimer *g_nickelmenu_toggle_timer = nullptr;
+static QTimer *g_nickelturn_timer = nullptr;
+static QPointer<QWidget> g_reader_toolbar_toggle_button;
+static QPointer<QWidget> g_active_reading_view;
+static QPointer<QWidget> g_reading_menu_breadcrumb_slider;
+static bool g_reader_toolbar_button_diagnostic_logged = false;
+static bool g_pending_toolbar_toggle_request = false;
+static unsigned int g_pending_toolbar_toggle_ticks = 0;
+static QString g_pending_toolbar_toggle_content_id;
 static QString g_pending_native_anchor_content_id;
 static void *g_pending_native_anchor_webkit_view = nullptr;
 static unsigned int g_pending_native_anchor_generation = 0;
@@ -84,27 +127,12 @@ static unsigned int g_pending_native_anchor_ticks = 0;
 static unsigned int g_pending_horizontal_generation = 0;
 static unsigned int g_pending_horizontal_ticks = 0;
 
-// 一次性 CSS handoff 診斷只保留在記憶體；由 Qt timer 安全地寫入持久 log。
-enum CssHandoffDiagnosticResult {
-    CssHandoffDiagnosticNone,
-    CssHandoffDiagnosticAppended,
-    CssHandoffDiagnosticNoActiveContent,
-    CssHandoffDiagnosticNoOverride,
-};
-struct CssHandoffDiagnostic {
-    unsigned int ticks_remaining;
-    CssHandoffDiagnosticResult result;
-    char previous_mode[16];
-    char mode[16];
-    char content_id[512];
-};
-static CssHandoffDiagnostic g_css_handoff_diagnostic = {};
-static pthread_mutex_t g_css_handoff_diagnostic_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-static uintptr_t g_kepub_add_css_start = 0;
-static bool g_firmware_matches = false;
-static uintptr_t g_kepub_render_shortcover_start = 0;
-static uintptr_t g_kepub_set_writing_direction_start = 0;
+static bool g_runtime_ready = false;
+static unsigned int g_bookmark_notice_ticks = 0u;
+static bool g_bookmark_restore_warning_pending = false;
+static BookmarkStorage g_pending_restore_bookmark = {};
+static bool g_pending_restore_bookmark_valid = false;
+static QString g_pending_dialog_message;
 static QString g_last_rendered_content_id;
 static pthread_mutex_t g_rendered_content_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -477,37 +505,47 @@ bool persistCachedModeJson(const QString &content_id, const char *mode) {
 }
 
 // 取得目前閱讀中書籍的 ContentID，並查詢是否有已儲存的模式覆寫。
-bool getActiveModeJsonOverride(QString *content_id, char *mode, size_t mode_size) {
-    *content_id = snapshotActiveReaderState().content_id;
-    return !content_id->isEmpty() && lookupCachedModeJson(*content_id, mode, mode_size);
+bool getActiveModeJsonOverride(char *mode, size_t mode_size) {
+    const QString content_id = snapshotActiveReaderState().content_id;
+    return !content_id.isEmpty() && lookupCachedModeJson(content_id, mode, mode_size);
 }
 
 
-// 判斷 CSS hook 是否由 KEPUB 的 CSS 建構函式呼叫，避免影響其他 WebKit 頁面。
+// 以執行時解析到的符號位址辨識 caller，避免韌體搬動函式後沿用舊 offset/size。
+bool wasCalledFromSymbol(uintptr_t return_address, void *expected_symbol) {
+    Dl_info caller_info;
+    Dl_info expected_info;
+    const uintptr_t caller = return_address & ~uintptr_t(1);
+    if (expected_symbol == nullptr ||
+        dladdr(reinterpret_cast<void *>(caller), &caller_info) == 0 ||
+        dladdr(expected_symbol, &expected_info) == 0 ||
+        caller_info.dli_saddr == nullptr || expected_info.dli_saddr == nullptr)
+        return false;
+    return (reinterpret_cast<uintptr_t>(caller_info.dli_saddr) & ~uintptr_t(1)) ==
+           (reinterpret_cast<uintptr_t>(expected_info.dli_saddr) & ~uintptr_t(1));
+}
+
 bool wasCalledByKepubCssBuilder(uintptr_t return_address) {
-    return_address &= ~uintptr_t(1);
-    return g_firmware_matches && return_address >= g_kepub_add_css_start &&
-           return_address < g_kepub_add_css_start + kKepubAddCssToHtmlSize;
+    return wasCalledFromSymbol(return_address, nickelturn_kepub_add_css_to_html);
 }
 
-
-// 判斷 Content::getBookId 是否由 KEPUB reader 開書流程呼叫。
 bool wasCalledByKepubRenderShortcover(uintptr_t return_address) {
-    return_address &= ~uintptr_t(1);
-    return g_firmware_matches && return_address >= g_kepub_render_shortcover_start &&
-           return_address < g_kepub_render_shortcover_start + kKepubRenderShortcoverSize;
+    return wasCalledFromSymbol(return_address, nickelturn_kepub_render_shortcover);
 }
 
-// 判斷 WebkitView 方向設定是否來自 KEPUB reader，而非其他畫面。
 bool wasCalledByKepubSetWritingDirection(uintptr_t return_address) {
-    return_address &= ~uintptr_t(1);
-    return g_firmware_matches && return_address >= g_kepub_set_writing_direction_start &&
-           return_address < g_kepub_set_writing_direction_start + kKepubSetWritingDirectionSize;
+    return wasCalledFromSymbol(return_address, nickelturn_kepub_set_writing_direction);
 }
 
-// 從 KEPUB 原始 CSS 偵測直排；部分商店書的 WritingDirection raw 值仍為橫排。
+// 從 KEPUB 原始 CSS 的 writing-mode 宣告偵測直排；部分商店書的 WritingDirection raw 值仍為橫排。
 void observeVerticalSourceModeFromCss(const QString &css) {
-    if (!css.contains(QLatin1String("vertical-rl"), Qt::CaseInsensitive))
+    static const QRegularExpression comments(QStringLiteral("/\\*[\\s\\S]*?\\*/"));
+    static const QRegularExpression vertical_writing_mode(
+        QStringLiteral("(?:^|[;{])\\s*(?:-epub-|-(?:webkit|moz)-)?writing-mode\\s*:\\s*vertical-rl\\b"),
+        QRegularExpression::CaseInsensitiveOption);
+    QString uncommented_css = css;
+    uncommented_css.remove(comments);
+    if (!vertical_writing_mode.match(uncommented_css).hasMatch())
         return;
     (void)pthread_mutex_lock(&g_source_mode_mutex);
     if (!g_active_content_id.isEmpty() && g_source_mode != SourceModeVerticalRL) {
@@ -538,34 +576,6 @@ void scheduleHorizontalSourceMode() {
     g_pending_horizontal_ticks = 3u;
 }
 
-// 驗證 symbol 位於目前 libnickel 的預期 offset，並在需要時回傳已移除 Thumb bit 的位址。
-bool validateLibnickelOffset(void *symbol, void *libnickel_base, uintptr_t offset,
-                             const char *symbol_name, uintptr_t *normalized_address) {
-    Dl_info info;
-    if (dladdr(symbol, &info) == 0 || info.dli_fbase != libnickel_base) {
-        nickelturn_event_log("NickelTurn: cannot determine %s libnickel base address", symbol_name);
-        return false;
-    }
-    const uintptr_t actual = reinterpret_cast<uintptr_t>(symbol) & ~uintptr_t(1);
-    const uintptr_t expected = reinterpret_cast<uintptr_t>(libnickel_base) + offset;
-    if (actual != expected) {
-        nickelturn_event_log("NickelTurn: unsupported %s offset %p (expected %p)", symbol_name,
-                             reinterpret_cast<void *>(actual), reinterpret_cast<void *>(expected));
-        return false;
-    }
-    if (normalized_address != nullptr)
-        *normalized_address = actual;
-    return true;
-}
-
-// 一筆 firmware guard：symbol、預期 offset、log 名稱，以及可選的已正規化位址輸出。
-struct FirmwareOffsetGuard {
-    void *symbol;
-    uintptr_t offset;
-    const char *symbol_name;
-    uintptr_t *normalized_address;
-};
-
 // 確認 NickelHook 已解析所有本外掛會使用的 symbol，避免後續解參考空指標。
 bool areRequiredSymbolsAvailable(void *const *symbols, const char *const *names, size_t count) {
     for (size_t i = 0; i < count; ++i) {
@@ -575,92 +585,6 @@ bool areRequiredSymbolsAvailable(void *const *symbols, const char *const *names,
         }
     }
     return true;
-}
-
-// 確認所有切換流程所需的原生函式入口都已在 firmware guard 後完成設定。
-bool isNativeKepubApiReady() {
-#define CHECK_NATIVE_API(field, label) \
-    do { \
-        if (g_native_kepub_api.field == nullptr) { \
-            nickelturn_event_log("NickelTurn: native API entrypoint unavailable name=%s", label); \
-            return false; \
-        } \
-    } while (0)
-    CHECK_NATIVE_API(update_html_css, "updateHtmlCss");
-    CHECK_NATIVE_API(reload_chapter, "reloadChapter");
-    CHECK_NATIVE_API(set_writing_direction, "setWritingDirection");
-    CHECK_NATIVE_API(web_view, "webView");
-    CHECK_NATIVE_API(set_page_progression, "setPageProgressionDirection");
-    CHECK_NATIVE_API(bookmark_for_current_location, "bookmarkForCurrentLocation");
-    CHECK_NATIVE_API(destroy_bookmark_shared_data, "BookmarkSharedData destructor");
-    CHECK_NATIVE_API(destroy_scobject, "ScObject destructor");
-    CHECK_NATIVE_API(go_to_bookmark_anchor, "goToBookmarkAnchor");
-    CHECK_NATIVE_API(assign_bookmark_shared_data, "BookmarkSharedData assignment");
-#undef CHECK_NATIVE_API
-    return true;
-}
-
-// 在一次 toggle 前開始觀測下一次 KEPUB CSS handoff，最多等待兩秒。
-void beginCssHandoffDiagnostic(const char *previous_mode) {
-    (void)pthread_mutex_lock(&g_css_handoff_diagnostic_mutex);
-    g_css_handoff_diagnostic.ticks_remaining = 8u;
-    g_css_handoff_diagnostic.result = CssHandoffDiagnosticNone;
-    (void)snprintf(g_css_handoff_diagnostic.previous_mode,
-                   sizeof(g_css_handoff_diagnostic.previous_mode), "%s",
-                   previous_mode == nullptr ? "" : previous_mode);
-    g_css_handoff_diagnostic.mode[0] = '\0';
-    g_css_handoff_diagnostic.content_id[0] = '\0';
-    (void)pthread_mutex_unlock(&g_css_handoff_diagnostic_mutex);
-}
-
-// CSS hook 僅記下第一個觀測結果；不可在這裡寫入使用者儲存區。
-void recordCssHandoffDiagnostic(CssHandoffDiagnosticResult result, const QString &content_id,
-                                const char *mode) {
-    (void)pthread_mutex_lock(&g_css_handoff_diagnostic_mutex);
-    if (g_css_handoff_diagnostic.ticks_remaining != 0u &&
-        g_css_handoff_diagnostic.result == CssHandoffDiagnosticNone) {
-        const QByteArray content_id_utf8 = content_id.toUtf8();
-        g_css_handoff_diagnostic.result = result;
-        (void)snprintf(g_css_handoff_diagnostic.mode, sizeof(g_css_handoff_diagnostic.mode),
-                       "%s", mode == nullptr ? "" : mode);
-        (void)snprintf(g_css_handoff_diagnostic.content_id,
-                       sizeof(g_css_handoff_diagnostic.content_id), "%s",
-                       content_id_utf8.constData());
-    }
-    (void)pthread_mutex_unlock(&g_css_handoff_diagnostic_mutex);
-}
-
-// 在 Qt timer 中輸出一次性 CSS 診斷結果，避免 render hook 進行持久 I/O。
-void processCssHandoffDiagnostic() {
-    CssHandoffDiagnostic diagnostic = {};
-    bool ready_to_log = false;
-    (void)pthread_mutex_lock(&g_css_handoff_diagnostic_mutex);
-    if (g_css_handoff_diagnostic.ticks_remaining != 0u) {
-        if (g_css_handoff_diagnostic.result != CssHandoffDiagnosticNone ||
-            --g_css_handoff_diagnostic.ticks_remaining == 0u) {
-            diagnostic = g_css_handoff_diagnostic;
-            g_css_handoff_diagnostic.ticks_remaining = 0u;
-            ready_to_log = true;
-        }
-    }
-    (void)pthread_mutex_unlock(&g_css_handoff_diagnostic_mutex);
-    if (!ready_to_log)
-        return;
-    switch (diagnostic.result) {
-    case CssHandoffDiagnosticAppended:
-        // 成功切換已有一筆摘要；只把異常 handoff 寫入持久 log。
-        break;
-    case CssHandoffDiagnosticNoActiveContent:
-        nickelturn_event_log("NickelTurn: toggle CSS handoff had no active ContentID");
-        break;
-    case CssHandoffDiagnosticNoOverride:
-        nickelturn_event_log("NickelTurn: toggle CSS handoff had no JSON override ContentID=%s",
-                             diagnostic.content_id);
-        break;
-    default:
-        nickelturn_event_log("NickelTurn: toggle CSS handoff was not observed within 2 seconds");
-        break;
-    }
 }
 
 // 釋放 bookmarkForCurrentLocation 建構出的暫存 Bookmark，確保兩個析構步驟不會漏掉其一。
@@ -683,17 +607,208 @@ void *nickelturn_original_reading_view_left_to_right_page_progress_direction = n
 void *nickelturn_bookmark_for_current_location = nullptr;
 void *nickelturn_bookmark_shared_data_destructor = nullptr;
 void *nickelturn_scobject_destructor = nullptr;
-void *nickelturn_kepub_go_to_bookmark_anchor = nullptr;
-void *nickelturn_bookmark_shared_data_assign = nullptr;
+void *nickelturn_reading_view_go_to_bookmark = nullptr;
 void *nickelturn_original_content_get_book_id = nullptr;
 void *nickelturn_content_get_book_id = nullptr;
 void *nickelturn_kepub_render_shortcover = nullptr;
 void *nickelturn_original_webkit_set_writing_direction = nullptr;
 void *nickelturn_kepub_set_writing_direction = nullptr;
 void *nickelturn_webkit_set_writing_direction = nullptr;
+void *nickelturn_original_reading_menu_view_constructor = nullptr;
+void *nickelturn_original_quick_turn_event_filter_constructor = nullptr;
+void *nickelturn_reading_view_left_to_right_writing_direction = nullptr;
+void *nickelturn_reading_menu_view_font_button = nullptr;
+void *nickelturn_reading_menu_view_stats_button = nullptr;
+void *nickelturn_original_breadcrumb_slider_constructor = nullptr;
+void *nickelturn_breadcrumb_slider_set_thick_line_enabled = nullptr;
+void *nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled = nullptr;
+void *nickelturn_original_reading_menu_scrubber_controller_constructor = nullptr;
+void *nickelturn_scrubber_view_left_button = nullptr;
+void *nickelturn_scrubber_view_right_button = nullptr;
+void *nickelturn_scrubber_controller_prev_chapter = nullptr;
+void *nickelturn_scrubber_controller_next_chapter = nullptr;
+void *nickelturn_touch_label_constructor = nullptr;
+void *nickelturn_touch_label_set_deselected_pixmap = nullptr;
+void *nickelturn_touch_label_set_selected_pixmap = nullptr;
+void *nickelturn_confirmation_dialog_factory_show_ok_dialog = nullptr;
 }
 
-// 設定內容由 config/nickelturn 封裝；此處只在卸載時移除該獨立設定檔。
+// 從閱讀器建立 QuickTurnEventFilter 時取得目前 ReadingView，供閱讀選單進度條同步原生方向。
+extern "C" void NickelTurnQuickTurnEventFilterConstructor(
+    void *event_filter, void *delegate, QWidget *parent, QWidget *slider,
+    int slider_zone_width, bool constructor_option) {
+    QuickTurnEventFilterConstructorFn original =
+        reinterpret_cast<QuickTurnEventFilterConstructorFn>(
+            nickelturn_original_quick_turn_event_filter_constructor);
+    if (original == nullptr) {
+        nickelturn_log("NickelTurn original QuickTurnEventFilter constructor pointer missing");
+        return;
+    }
+    original(event_filter, delegate, parent, slider, slider_zone_width, constructor_option);
+    if (!g_runtime_ready)
+        return;
+    if (parent == nullptr || !parent->inherits("ReadingView"))
+        return;
+    g_active_reading_view = parent;
+}
+
+// 記住閱讀選單 scrubber 實際使用的 BreadcrumbSlider；它和 QuickTurnSlider 是不同元件。
+extern "C" void NickelTurnBreadcrumbSliderConstructor(void *slider, QWidget *parent) {
+    BreadcrumbSliderConstructorFn original =
+        reinterpret_cast<BreadcrumbSliderConstructorFn>(
+            nickelturn_original_breadcrumb_slider_constructor);
+    if (original == nullptr) {
+        nickelturn_log("NickelTurn original BreadcrumbSlider constructor pointer missing");
+        return;
+    }
+    original(slider, parent);
+    if (!g_runtime_ready)
+        return;
+    QWidget *widget = static_cast<QWidget *>(slider);
+    if (widget == nullptr || !widget->inherits("BreadcrumbSlider"))
+        return;
+    g_reading_menu_breadcrumb_slider = widget;
+}
+
+typedef QWidget *(*ScrubberButtonGetterFn)(const void *);
+typedef void (*ScrubberChapterActionFn)(void *);
+typedef void (*ScrubberControllerConstructorFn)(void *, void *);
+
+// 回傳 1 表示已接好、0 表示 view 尚未建立、-1 表示無法安全安裝。
+static int installScrubberChapterButtonRouting(void *controller, QWidget *reading_view) {
+    if (controller == nullptr || reading_view == nullptr)
+        return -1;
+
+    QWidget *scrubber_view = nullptr;
+    const QList<QWidget *> child_widgets = reading_view->findChildren<QWidget *>();
+    for (int i = 0; i < child_widgets.size(); ++i) {
+        if (child_widgets.at(i)->inherits("ReadingMenuScrubberView")) {
+            scrubber_view = child_widgets.at(i);
+            break;
+        }
+    }
+    if (scrubber_view == nullptr)
+        return 0;
+
+    ScrubberButtonGetterFn left_getter =
+        reinterpret_cast<ScrubberButtonGetterFn>(nickelturn_scrubber_view_left_button);
+    ScrubberButtonGetterFn right_getter =
+        reinterpret_cast<ScrubberButtonGetterFn>(nickelturn_scrubber_view_right_button);
+    ScrubberChapterActionFn prev_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_prev_chapter);
+    ScrubberChapterActionFn next_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_next_chapter);
+    if (left_getter == nullptr || right_getter == nullptr ||
+        prev_chapter == nullptr || next_chapter == nullptr) {
+        nickelturn_event_log("NickelTurn: chapter routing unavailable getter-left=%d getter-right=%d prev=%d next=%d",
+                             left_getter != nullptr ? 1 : 0,
+                             right_getter != nullptr ? 1 : 0,
+                             prev_chapter != nullptr ? 1 : 0,
+                             next_chapter != nullptr ? 1 : 0);
+        return -1;
+    }
+
+    QWidget *left_button = left_getter(scrubber_view);
+    QWidget *right_button = right_getter(scrubber_view);
+    if (left_button == nullptr || right_button == nullptr ||
+        !left_button->inherits("TouchLabel") || !right_button->inherits("TouchLabel")) {
+        nickelturn_event_log("NickelTurn: chapter routing skipped; button classes left=%s right=%s",
+                             left_button != nullptr ? left_button->metaObject()->className() : "null",
+                             right_button != nullptr ? right_button->metaObject()->className() : "null");
+        return -1;
+    }
+
+    NickelTurnChapterButtonRoute *route =
+        new NickelTurnChapterButtonRoute(controller, reading_view, scrubber_view);
+    const bool left_connected = QObject::connect(
+        left_button, SIGNAL(tapped(bool)), route, SLOT(leftTapped(bool)));
+    const bool right_connected = QObject::connect(
+        right_button, SIGNAL(tapped(bool)), route, SLOT(rightTapped(bool)));
+    if (!left_connected || !right_connected) {
+        delete route;
+        nickelturn_event_log("NickelTurn: chapter routing connect failed left=%d right=%d",
+                             left_connected ? 1 : 0, right_connected ? 1 : 0);
+        return -1;
+    }
+
+    // 原生 loadView 將 left/right 分別連到 prevChapter/nextChapter；新路由接妥後
+    // 才移除這兩個 sender 到 controller 的原生連線，goBackLeft/Right 完全不動。
+    QObject::disconnect(left_button, nullptr, static_cast<QObject *>(controller), nullptr);
+    QObject::disconnect(right_button, nullptr, static_cast<QObject *>(controller), nullptr);
+    return 1;
+}
+
+// Controller 建構時 view 尚未建立；用短 timer 等 loadView 完成，再改進度列章節按鈕連線。
+extern "C" void NickelTurnReadingMenuScrubberControllerConstructor(
+    void *controller, void *reading_view) {
+    ScrubberControllerConstructorFn original =
+        reinterpret_cast<ScrubberControllerConstructorFn>(
+            nickelturn_original_reading_menu_scrubber_controller_constructor);
+    if (original == nullptr) {
+        nickelturn_event_log("NickelTurn: original scrubber controller constructor missing");
+        return;
+    }
+    original(controller, reading_view);
+    if (!g_runtime_ready || controller == nullptr || reading_view == nullptr)
+        return;
+
+    QObject *controller_object = static_cast<QObject *>(controller);
+    QTimer *timer = new QTimer(controller_object);
+    timer->setInterval(25);
+    timer->setProperty("nickelturn-attempts", 0);
+    QObject::connect(timer, &QTimer::timeout, timer,
+                     [controller, reading_view, timer]() {
+        const int result = installScrubberChapterButtonRouting(
+            controller, static_cast<QWidget *>(reading_view));
+        if (result != 0) {
+            timer->stop();
+            timer->deleteLater();
+            return;
+        }
+        const int attempts = timer->property("nickelturn-attempts").toInt() + 1;
+        timer->setProperty("nickelturn-attempts", attempts);
+        if (attempts >= 40) {
+            nickelturn_event_log("NickelTurn: chapter routing timed out waiting for scrubber view");
+            timer->stop();
+            timer->deleteLater();
+        }
+    });
+    timer->start(0);
+}
+
+NickelTurnChapterButtonRoute::NickelTurnChapterButtonRoute(
+    void *controller, QWidget *reading_view, QObject *parent)
+    : QObject(parent), m_controller(controller), m_reading_view(reading_view) {
+}
+
+void NickelTurnChapterButtonRoute::leftTapped(bool) {
+    dispatch(true);
+}
+
+void NickelTurnChapterButtonRoute::rightTapped(bool) {
+    dispatch(false);
+}
+
+void NickelTurnChapterButtonRoute::dispatch(bool from_left) {
+    ReadingViewLeftToRightWritingDirectionFn get_direction =
+        reinterpret_cast<ReadingViewLeftToRightWritingDirectionFn>(
+            nickelturn_reading_view_left_to_right_writing_direction);
+    ScrubberChapterActionFn prev_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_prev_chapter);
+    ScrubberChapterActionFn next_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_next_chapter);
+    if (m_controller == nullptr || m_reading_view.isNull() || get_direction == nullptr ||
+        prev_chapter == nullptr || next_chapter == nullptr) {
+        nickelturn_event_log("NickelTurn: chapter tap ignored; routing API or reader unavailable");
+        return;
+    }
+
+    const bool left_to_right = get_direction(m_reading_view.data());
+    const bool call_prev = from_left == left_to_right;
+    (call_prev ? prev_chapter : next_chapter)(m_controller);
+}
+
+// 清除舊版 NickelMenu 整合留下的設定與 script。
 extern "C" bool nickelturn_uninstall(void) {
     bool ok = true;
     nickelturn_event_log("NickelTurn: uninstall cleanup started");
@@ -725,6 +840,8 @@ extern "C" void NickelTurnContentGetBookId(QString *result, const void *content)
     }
 
     original(result, content);
+    if (!g_runtime_ready)
+        return;
     if (!wasCalledByKepubRenderShortcover(caller) || result->isEmpty())
         return;
 
@@ -756,6 +873,9 @@ extern "C" bool NickelTurnReadingViewLeftToRightPageProgressDirection(const void
     if (original == nullptr)
         return true;
 
+    if (!g_runtime_ready)
+        return original(reading_view);
+
     const ActiveReaderState state = snapshotActiveReaderState();
 
     char override_mode[16];
@@ -781,6 +901,8 @@ extern "C" void NickelTurnWebkitSetWritingDirection(void *webkit_view, int direc
     }
 
     original(webkit_view, direction);
+    if (!g_runtime_ready)
+        return;
     if (!wasCalledByKepubSetWritingDirection(caller))
         return;
 
@@ -802,12 +924,6 @@ extern "C" void NickelTurnWebkitSetWritingDirection(void *webkit_view, int direc
     (void)pthread_mutex_unlock(&g_source_mode_mutex);
 }
 
-// 接收 NickelMenu script 的 SIGUSR1；只設定旗標，不在 signal handler 操作 Qt。
-static void nickelturn_toggle_signal_handler(int) {
-    // 此處僅做 async-signal-safe 操作；Qt、JSON 與 log 全部交給 timer 處理。
-    g_nickelmenu_toggle_requested = 1;
-}
-
 // 建立 NickelTurn 自己使用的目錄；既有目錄與檔案都不會被刪除。
 static bool ensureNickelTurnDirectories() {
     if (mkdir("/mnt/onboard/.adds", 0755) != 0 && errno != EEXIST) {
@@ -821,40 +937,13 @@ static bool ensureNickelTurnDirectories() {
     return true;
 }
 
-// 成功啟動全部 toggle 元件後才建立 ready marker，讓 script 可以安全發送 SIGUSR1。
-static bool markNickelTurnReady() {
-    const int fd = open(kNickelTurnReadyFlag, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        nickelturn_event_log("NickelTurn: cannot create ready marker error=%s", strerror(errno));
-        return false;
+static void removeLegacyNickelMenuArtifact(const char *path, const char *name) {
+    if (unlink(path) == 0) {
+        nickelturn_event_log("NickelTurn: removed legacy NickelMenu %s", name);
+    } else if (errno != ENOENT) {
+        nickelturn_event_log("NickelTurn: cannot remove legacy NickelMenu %s error=%s",
+                             name, strerror(errno));
     }
-    char ready_contents[32];
-    const int ready_size = snprintf(ready_contents, sizeof(ready_contents), "%ld\n", (long)getpid());
-    const bool ok = ready_size > 0 && (size_t)ready_size < sizeof(ready_contents) &&
-                    writeAll(fd, ready_contents, (size_t)ready_size);
-    int error = ok ? 0 : (errno == 0 ? EIO : errno);
-    if (close(fd) != 0 && error == 0)
-        error = errno;
-    if (error != 0) {
-        (void)unlink(kNickelTurnReadyFlag);
-        nickelturn_event_log("NickelTurn: cannot write ready marker error=%s", strerror(error));
-        return false;
-    }
-    return true;
-}
-
-// 安裝 SIGUSR1 handler；handler 本身只設旗標，避免在 signal context 操作 Qt。
-static bool installNickelTurnToggleSignalHandler() {
-    struct sigaction action;
-    memset(&action, 0, sizeof(action));
-    action.sa_handler = nickelturn_toggle_signal_handler;
-    sigemptyset(&action.sa_mask);
-    action.sa_flags = SA_RESTART;
-    if (sigaction(SIGUSR1, &action, nullptr) != 0) {
-        nickelturn_event_log("NickelTurn could not install NickelMenu bridge signal handler");
-        return false;
-    }
-    return true;
 }
 
 // 在延後時間到達時，將尚未收到方向 setter 的書籍確定為原始橫排。
@@ -869,7 +958,48 @@ static void processPendingHorizontalSourceMode() {
     (void)pthread_mutex_unlock(&g_source_mode_mutex);
 }
 
-// 在新章節 DOM 建立後，以 Kobo 原生 Bookmark API 回到切換前的位置。
+// ReadingView 重排後，同步已建立的 BreadcrumbSlider 樣式。
+static void synchronizeReaderProgressSliderStyles(const QString &content_id) {
+    TouchSliderFlagSetterFn set_thick_line_enabled =
+        reinterpret_cast<TouchSliderFlagSetterFn>(nickelturn_breadcrumb_slider_set_thick_line_enabled);
+    TouchSliderFlagSetterFn set_inverse_thick_line_enabled =
+        reinterpret_cast<TouchSliderFlagSetterFn>(nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled);
+    if (g_active_reading_view.isNull()) {
+        nickelturn_event_log("NickelTurn: progress style sync skipped; active ReadingView is unavailable");
+        return;
+    }
+    char current_mode[16];
+    const bool has_mode = lookupCachedModeJson(content_id, current_mode, sizeof(current_mode));
+    const bool mode_left_to_right = has_mode
+        ? strcmp(current_mode, "vertical-rl") != 0
+        : true;
+    ReadingViewLeftToRightWritingDirectionFn get_writing_direction =
+        reinterpret_cast<ReadingViewLeftToRightWritingDirectionFn>(
+            nickelturn_reading_view_left_to_right_writing_direction);
+    const bool left_to_right = get_writing_direction != nullptr
+        ? get_writing_direction(g_active_reading_view.data())
+        : mode_left_to_right;
+
+    if (!g_reading_menu_breadcrumb_slider.isNull()) {
+        if (set_thick_line_enabled == nullptr || set_inverse_thick_line_enabled == nullptr) {
+            nickelturn_event_log("NickelTurn: BreadcrumbSlider style setters unavailable thick=%d inverse=%d",
+                                 set_thick_line_enabled != nullptr ? 1 : 0,
+                                 set_inverse_thick_line_enabled != nullptr ? 1 : 0);
+            return;
+        }
+        // TouchSlider setters only store flags, so refresh the widget style explicitly.
+        set_thick_line_enabled(g_reading_menu_breadcrumb_slider.data(), left_to_right);
+        set_inverse_thick_line_enabled(g_reading_menu_breadcrumb_slider.data(), !left_to_right);
+        QStyle *style = g_reading_menu_breadcrumb_slider->style();
+        if (style != nullptr) {
+            style->unpolish(g_reading_menu_breadcrumb_slider.data());
+            style->polish(g_reading_menu_breadcrumb_slider.data());
+        }
+        g_reading_menu_breadcrumb_slider->update();
+    }
+}
+
+// 在新章節 DOM 建立後，以 ReadingView 公開 API 回到切換前的位置。
 static void processPendingNativeAnchorRestore() {
     if (g_pending_native_anchor_ticks == 0u || --g_pending_native_anchor_ticks != 0u)
         return;
@@ -878,29 +1008,52 @@ static void processPendingNativeAnchorRestore() {
         state.content_id == g_pending_native_anchor_content_id &&
         state.webkit_view == g_pending_native_anchor_webkit_view &&
         state.direction_generation == g_pending_native_anchor_generation;
-    void *anchor_webkit_view = g_pending_native_anchor_webkit_view;
     const QString anchor_content_id = g_pending_native_anchor_content_id;
     g_pending_native_anchor_content_id.clear();
     g_pending_native_anchor_webkit_view = nullptr;
     if (still_active) {
-        if (g_native_kepub_api.go_to_bookmark_anchor != nullptr) {
-            g_native_kepub_api.go_to_bookmark_anchor(anchor_webkit_view);
-            nickelturn_event_log("NickelTurn: bookmark restore invoked after reflow");
+        if (g_pending_restore_bookmark_valid && !g_active_reading_view.isNull() &&
+                   g_native_kepub_api.reading_view_go_to_bookmark != nullptr) {
+            const bool restored = g_native_kepub_api.reading_view_go_to_bookmark(
+                g_active_reading_view.data(), &g_pending_restore_bookmark);
+            destroyCapturedBookmark(&g_pending_restore_bookmark);
+            g_pending_restore_bookmark_valid = false;
+            if (restored) {
+                nickelturn_event_log("NickelTurn: bookmark restored through ReadingView API after reflow");
+            } else {
+                g_bookmark_restore_warning_pending = true;
+                g_bookmark_notice_ticks = 1u;
+                nickelturn_event_log("NickelTurn: ReadingView::goToBookmark returned false after reflow ContentID=%s",
+                                     anchor_content_id.toUtf8().constData());
+            }
         } else {
-            nickelturn_event_log("NickelTurn: delayed native anchor restore unavailable; entrypoint is null ContentID=%s",
+            if (g_pending_restore_bookmark_valid) {
+                destroyCapturedBookmark(&g_pending_restore_bookmark);
+                g_pending_restore_bookmark_valid = false;
+            }
+            g_bookmark_restore_warning_pending = true;
+            g_bookmark_notice_ticks = 1u;
+            nickelturn_event_log("NickelTurn: bookmark capture or restore symbols unavailable ContentID=%s",
                                  anchor_content_id.toUtf8().constData());
         }
+        // Bookmark 還原可能更新 footer／slider；最後再同步方向樣式，避免被重設。
+        synchronizeReaderProgressSliderStyles(anchor_content_id);
     } else {
+        if (g_pending_restore_bookmark_valid) {
+            destroyCapturedBookmark(&g_pending_restore_bookmark);
+            g_pending_restore_bookmark_valid = false;
+        }
         nickelturn_event_log("NickelTurn: delayed native anchor restore canceled; reader state changed ContentID=%s",
                              anchor_content_id.toUtf8().constData());
     }
 }
 
 // 處理一次使用者切換：保存模式、更新 Kobo 原生方向與翻頁方向，再重新載入章節。
-static void processNickelMenuToggleRequest() {
+static void processNickelTurnToggleRequest() {
     // 前一次 reloadChapter 尚在等待原生錨點復原時，不允許覆蓋其暫存 Bookmark。
     if (g_pending_native_anchor_ticks != 0u) {
-        nickelturn_event_log("NickelTurn: toggle ignored; previous layout change is still restoring its anchor");
+        nickelturn_event_log("NickelTurn: toggle rejected; previous anchor restore still pending ticks=%u",
+                             g_pending_native_anchor_ticks);
         return;
     }
     const ActiveReaderState state = snapshotActiveReaderState();
@@ -918,125 +1071,397 @@ static void processNickelMenuToggleRequest() {
     if (!has_override)
         (void)snprintf(current_mode, sizeof(current_mode), "%s", sourceModeName(state.source_mode));
     const char *target_mode = strcmp(current_mode, "vertical-rl") == 0 ? "horizontal-tb" : "vertical-rl";
-    if (!isNativeKepubApiReady()) {
-        nickelturn_event_log("NickelTurn native layout entrypoint is missing; layout unchanged ContentID=%s",
-                             content_id_utf8.constData());
-        return;
-    }
     void *custom_web_view = g_native_kepub_api.web_view(state.webkit_view);
     if (custom_web_view == nullptr) {
         nickelturn_event_log("NickelTurn: active CustomWebView is unavailable; layout unchanged ContentID=%s",
                              content_id_utf8.constData());
         return;
     }
-    BookmarkStorage captured_bookmark;
-    g_native_kepub_api.bookmark_for_current_location(&captured_bookmark, state.webkit_view);
+    const bool can_restore_bookmark =
+        g_native_kepub_api.bookmark_for_current_location != nullptr &&
+        g_native_kepub_api.destroy_bookmark_shared_data != nullptr &&
+        g_native_kepub_api.destroy_scobject != nullptr &&
+        g_native_kepub_api.reading_view_go_to_bookmark != nullptr &&
+        !g_active_reading_view.isNull();
+    if (g_pending_restore_bookmark_valid) {
+        destroyCapturedBookmark(&g_pending_restore_bookmark);
+        g_pending_restore_bookmark_valid = false;
+    }
+    if (can_restore_bookmark) {
+        g_native_kepub_api.bookmark_for_current_location(
+            &g_pending_restore_bookmark, state.webkit_view);
+        g_pending_restore_bookmark_valid = true;
+    }
     if (!persistCachedModeJson(state.content_id, target_mode)) {
-        destroyCapturedBookmark(&captured_bookmark);
+        if (g_pending_restore_bookmark_valid) {
+            destroyCapturedBookmark(&g_pending_restore_bookmark);
+            g_pending_restore_bookmark_valid = false;
+        }
         nickelturn_event_log("NickelTurn JSON update failed; layout unchanged ContentID=%s",
                              content_id_utf8.constData());
+        showNickelTurnDialog(QString::fromUtf8(kDialogMessages.switch_failed));
         return;
     }
     const bool vertical = strcmp(target_mode, "vertical-rl") == 0;
-    beginCssHandoffDiagnostic(current_mode);
     g_native_kepub_api.set_writing_direction(state.webkit_view, vertical ? 3 : 0);
     g_native_kepub_api.set_page_progression(custom_web_view, QByteArray(vertical ? "rtl" : "ltr"));
     g_native_kepub_api.update_html_css(state.webkit_view);
     // reloadChapter 會走 Kobo 正常的重新載入與 repaint 流程；其後的新 DOM 才能正確
-    // 使用原生 Bookmark anchor，這個呼叫不能延後到 updateHtmlCss 的 queued work 之後。
+    // 使用 ReadingView 書籤 API，這個呼叫不能延後到 updateHtmlCss 的 queued work 之後。
     g_native_kepub_api.reload_chapter(state.webkit_view);
-    // goToBookmarkAnchor 讀取 reader +0x1c0 的 Bookmark；只複製其 QSharedDataPointer。
-    void *reader_bookmark_data = reinterpret_cast<char *>(state.webkit_view) +
-                                 kReaderBookmarkOffset + sizeof(uint32_t);
-    const void *captured_bookmark_data =
-        reinterpret_cast<const char *>(&captured_bookmark) + sizeof(uint32_t);
-    g_native_kepub_api.assign_bookmark_shared_data(reader_bookmark_data, captured_bookmark_data);
-    destroyCapturedBookmark(&captured_bookmark);
     g_pending_native_anchor_content_id = state.content_id;
     g_pending_native_anchor_webkit_view = state.webkit_view;
     g_pending_native_anchor_generation = state.direction_generation;
     // reloadChapter 回傳時 replacement DOM 尚未完成；四個 tick 留出完整一秒等待。
     g_pending_native_anchor_ticks = 4u;
+    if (!can_restore_bookmark) {
+        g_bookmark_restore_warning_pending = true;
+        nickelturn_event_log("NickelTurn: bookmark restore skipped; ReadingView bookmark symbols unavailable");
+    }
+    if (g_bookmark_restore_warning_pending)
+        g_bookmark_notice_ticks = 4u;
     nickelturn_event_log("NickelTurn: source-mode=%s from=%s to=%s ContentID=%s; preference saved and native reflow requested",
                          sourceModeName(state.source_mode), current_mode, target_mode,
                          content_id_utf8.constData());
 }
 
-// 每 250ms 在 Qt 主執行緒處理延後工作與已收到的切換請求。
+// 工具列點擊若剛好早於方向偵測完成，暫存請求讓 Qt timer 在狀態就緒後送出。
+static void handleReaderToolbarToggleClick() {
+    const ActiveReaderState state = snapshotActiveReaderState();
+    if (state.content_id.isEmpty()) {
+        nickelturn_event_log("NickelTurn: toolbar toggle clicked without an active KEPUB");
+        return;
+    }
+    if (g_pending_native_anchor_ticks != 0u) {
+        nickelturn_event_log("NickelTurn: toolbar toggle rejected; bookmark restore pending ticks=%u ContentID=%s",
+                             g_pending_native_anchor_ticks,
+                             state.content_id.toUtf8().constData());
+        return;
+    }
+    if (g_pending_toolbar_toggle_request) {
+        nickelturn_event_log("NickelTurn: toolbar toggle click rejected; request already pending ContentID=%s",
+                             state.content_id.toUtf8().constData());
+        return;
+    }
+    // 延到 Qt timer 執行，避免在 Kobo 正顯示閱讀工具列的 clicked signal 內重入原生 reader。
+    g_pending_toolbar_toggle_request = true;
+    g_pending_toolbar_toggle_ticks = 12u;
+    g_pending_toolbar_toggle_content_id = state.content_id;
+    nickelturn_event_log("NickelTurn: toolbar toggle queued on Qt timer ContentID=%s source-mode=%s webkit-view-present=%d",
+                         state.content_id.toUtf8().constData(), sourceModeName(state.source_mode),
+                         state.webkit_view == nullptr ? 0 : 1);
+}
+
+static void processPendingReaderToolbarToggleClick() {
+    if (!g_pending_toolbar_toggle_request)
+        return;
+    const ActiveReaderState state = snapshotActiveReaderState();
+    if (state.content_id != g_pending_toolbar_toggle_content_id) {
+        g_pending_toolbar_toggle_request = false;
+        g_pending_toolbar_toggle_ticks = 0u;
+        g_pending_toolbar_toggle_content_id.clear();
+        nickelturn_event_log("NickelTurn: pending toolbar toggle canceled; active book changed");
+        return;
+    }
+    if (state.source_mode != SourceModeUnknown && state.webkit_view != nullptr &&
+        g_pending_native_anchor_ticks == 0u) {
+        g_pending_toolbar_toggle_request = false;
+        g_pending_toolbar_toggle_ticks = 0u;
+        g_pending_toolbar_toggle_content_id.clear();
+        nickelturn_event_log("NickelTurn: delayed toolbar toggle dispatched ContentID=%s",
+                             state.content_id.toUtf8().constData());
+        processNickelTurnToggleRequest();
+        return;
+    }
+    if (g_pending_toolbar_toggle_ticks > 0u)
+        --g_pending_toolbar_toggle_ticks;
+    if (g_pending_toolbar_toggle_ticks == 0u) {
+        g_pending_toolbar_toggle_request = false;
+        g_pending_toolbar_toggle_content_id.clear();
+        nickelturn_event_log("NickelTurn: toolbar toggle request expired; layout still not ready ContentID=%s source-mode=%s webkit-view-present=%d",
+                             state.content_id.toUtf8().constData(), sourceModeName(state.source_mode),
+                             state.webkit_view == nullptr ? 0 : 1);
+    }
+}
+
+// 單色頁面圖示：左側以直線表示直排，右側以橫線表示橫排。
+static QIcon createWritingDirectionIcon(const QWidget *widget) {
+    QPixmap pixmap(32, 32);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QPen pen(widget->palette().color(QPalette::ButtonText));
+    pen.setWidthF(1.8);
+    pen.setCapStyle(Qt::RoundCap);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    // 原生工具列圖示幾乎填滿 TouchLabel 的 pixmap；放大線稿本身，避免同尺寸 pixmap 裡的留白讓圖示看起來偏小。
+    painter.translate(16.0, 16.0);
+    painter.scale(1.25, 1.25);
+    painter.translate(-16.0, -16.0);
+    painter.drawRoundedRect(QRectF(4.5, 3.5, 23.0, 25.0), 2.0, 2.0);
+    painter.drawLine(QPointF(16.0, 7.5), QPointF(16.0, 24.5));
+    painter.drawLine(QPointF(9.0, 8.5), QPointF(9.0, 23.5));
+    painter.drawLine(QPointF(12.5, 8.5), QPointF(12.5, 23.5));
+    painter.drawLine(QPointF(19.0, 9.5), QPointF(24.0, 9.5));
+    painter.drawLine(QPointF(19.0, 14.0), QPointF(24.0, 14.0));
+    painter.drawLine(QPointF(19.0, 18.5), QPointF(24.0, 18.5));
+    painter.drawLine(QPointF(19.0, 23.0), QPointF(24.0, 23.0));
+    painter.end();
+    return QIcon(pixmap);
+}
+
+struct ReaderMenuButtonAnchor {
+    QBoxLayout *layout;
+    QWidget *widget;
+};
+
+// fontButton()/statsButton() 回傳實際按鈕，不是按鈕內的 icon；往父層找出 layout 中的直接項目。
+static ReaderMenuButtonAnchor findReaderMenuButtonAnchor(QWidget *button) {
+    QWidget *item_widget = button;
+    while (item_widget != nullptr) {
+        QWidget *parent = item_widget->parentWidget();
+        if (parent == nullptr)
+            break;
+        QBoxLayout *layout = qobject_cast<QBoxLayout *>(parent->layout());
+        if (layout != nullptr && layout->indexOf(item_widget) >= 0)
+            return {layout, item_widget};
+        item_widget = parent;
+    }
+    return {nullptr, nullptr};
+}
+
+// 將按鈕插在閱讀工具列的原生控制項旁；先用字體按鈕，沒有時改用統計按鈕。
+static void addReaderToolbarToggleButton(void *reading_menu_view) {
+    if (!g_runtime_ready || reading_menu_view == nullptr)
+        return;
+    QWidget *view = reinterpret_cast<QWidget *>(reading_menu_view);
+    QWidget *existing = view->findChild<QWidget *>(
+        QString::fromLatin1("nickelTurnToggleButton"));
+    if (existing != nullptr) {
+        g_reader_toolbar_toggle_button = existing;
+        return;
+    }
+
+    typedef QWidget *(*ReadingMenuButtonGetter)(const void *);
+    ReadingMenuButtonGetter font_button_getter = reinterpret_cast<ReadingMenuButtonGetter>(
+        nickelturn_reading_menu_view_font_button);
+    ReadingMenuButtonGetter stats_button_getter = reinterpret_cast<ReadingMenuButtonGetter>(
+        nickelturn_reading_menu_view_stats_button);
+    QWidget *anchor_button = font_button_getter == nullptr
+                                 ? nullptr
+                                 : font_button_getter(reading_menu_view);
+    if (anchor_button == nullptr && stats_button_getter != nullptr) {
+        anchor_button = stats_button_getter(reading_menu_view);
+    }
+
+    const ReaderMenuButtonAnchor anchor = findReaderMenuButtonAnchor(anchor_button);
+    if (anchor.layout == nullptr || anchor.widget == nullptr) {
+        if (!g_reader_toolbar_button_diagnostic_logged) {
+            g_reader_toolbar_button_diagnostic_logged = true;
+            nickelturn_event_log("NickelTurn: no ReadingMenuView font/stats button layout anchor");
+        }
+        queueNickelTurnDialog(kDialogMessages.switch_failed);
+        return;
+    }
+    typedef void (*TouchLabelConstructorFn)(void *, QWidget *, uint32_t);
+    TouchLabelConstructorFn touch_label_constructor = reinterpret_cast<TouchLabelConstructorFn>(
+        nickelturn_touch_label_constructor);
+    if (touch_label_constructor == nullptr) {
+        nickelturn_event_log("NickelTurn: TouchLabel constructor unavailable; reader toolbar toggle not inserted");
+        queueNickelTurnDialog(kDialogMessages.firmware);
+        return;
+    }
+    // TouchLabel 是 libnickel 私有類別，沒有可用標頭；依 NickelMenu 的作法配置原生物件儲存區後呼叫其韌體建構函式。
+    void *touch_label_storage = calloc(1, 256u);
+    if (touch_label_storage == nullptr) {
+        nickelturn_event_log("NickelTurn: cannot allocate TouchLabel storage; reader toolbar toggle not inserted");
+        queueNickelTurnDialog(kDialogMessages.switch_failed);
+        return;
+    }
+    QWidget *button_parent = anchor.widget->parentWidget();
+    touch_label_constructor(touch_label_storage, button_parent, 0u);
+    QWidget *button = reinterpret_cast<QWidget *>(touch_label_storage);
+    button->setObjectName(QString::fromLatin1("nickelTurnToggleButton"));
+    QAbstractButton *native_button = qobject_cast<QAbstractButton *>(anchor_button);
+    QLabel *native_label = qobject_cast<QLabel *>(anchor_button);
+    QSize native_icon_size = native_button == nullptr ? QSize() : native_button->iconSize();
+    if (native_label != nullptr) {
+        const QPixmap *native_pixmap = native_label->pixmap();
+        if (native_pixmap != nullptr && !native_pixmap->isNull())
+            native_icon_size = native_pixmap->size();
+    }
+    QSize native_button_size = anchor_button->sizeHint();
+    if (native_icon_size.width() <= 0 || native_icon_size.height() <= 0)
+        native_icon_size = QSize(44, 44);
+    if (native_button_size.width() > 0 && native_button_size.height() > 0)
+        button->setFixedSize(native_button_size);
+    const QPixmap icon_pixmap = createWritingDirectionIcon(button).pixmap(native_icon_size);
+    QLabel *label = qobject_cast<QLabel *>(button);
+    if (label != nullptr) {
+        label->setPixmap(icon_pixmap);
+        label->setAlignment(native_label == nullptr ? Qt::AlignCenter : native_label->alignment());
+        if (native_label != nullptr) {
+            label->setMargin(native_label->margin());
+            label->setIndent(native_label->indent());
+        }
+    }
+    typedef void (*TouchLabelPixmapSetterFn)(void *, const QPixmap &);
+    TouchLabelPixmapSetterFn set_deselected_pixmap = reinterpret_cast<TouchLabelPixmapSetterFn>(
+        nickelturn_touch_label_set_deselected_pixmap);
+    TouchLabelPixmapSetterFn set_selected_pixmap = reinterpret_cast<TouchLabelPixmapSetterFn>(
+        nickelturn_touch_label_set_selected_pixmap);
+    if (set_deselected_pixmap != nullptr)
+        set_deselected_pixmap(touch_label_storage, icon_pixmap);
+    if (set_selected_pixmap != nullptr)
+        set_selected_pixmap(touch_label_storage, icon_pixmap);
+    button->setToolTip(QString::fromUtf8("直橫排互換"));
+    button->setFocusPolicy(native_button == nullptr ? Qt::NoFocus : native_button->focusPolicy());
+    QPushButton *click_shim = new QPushButton(button_parent);
+    click_shim->setObjectName(QString::fromLatin1("nickelTurnClickShim"));
+    click_shim->setVisible(false);
+    const bool tap_connection = QObject::connect(
+        button, SIGNAL(tapped(bool)), click_shim, SIGNAL(pressed()));
+    if (!tap_connection) {
+        nickelturn_event_log("NickelTurn: cannot connect TouchLabel::tapped(bool) to click shim");
+        queueNickelTurnDialog(kDialogMessages.switch_failed);
+        delete click_shim;
+        delete button;
+        return;
+    }
+    QObject::connect(click_shim, &QPushButton::pressed, click_shim,
+                     []() { handleReaderToolbarToggleClick(); });
+    const int anchor_index = anchor.layout->indexOf(anchor.widget);
+    anchor.layout->insertWidget(anchor_index + 1, button);
+    g_reader_toolbar_toggle_button = button;
+}
+
+// 原生 ReadingMenuView 建構並建立工具列 widget 後立即插入按鈕，避免顯示後再觸發第二次排版。
+extern "C" void NickelTurnReadingMenuViewConstructor(
+    void *reading_menu_view, void *parent, const QByteArray &name, bool compact) {
+    typedef void (*ReadingMenuViewConstructorFn)(void *, void *, const QByteArray &, bool);
+    ReadingMenuViewConstructorFn original = reinterpret_cast<ReadingMenuViewConstructorFn>(
+        nickelturn_original_reading_menu_view_constructor);
+    if (original == nullptr) {
+        nickelturn_log("NickelTurn original ReadingMenuView constructor pointer missing");
+        return;
+    }
+    original(reading_menu_view, parent, name, compact);
+    addReaderToolbarToggleButton(reading_menu_view);
+}
+
+static void updateReaderToolbarToggleButton() {
+    if (g_reader_toolbar_toggle_button.isNull())
+        return;
+    const ActiveReaderState state = snapshotActiveReaderState();
+    const bool has_active_kepub = !state.content_id.isEmpty();
+    g_reader_toolbar_toggle_button->setVisible(has_active_kepub);
+    const bool ready = has_active_kepub && !g_pending_toolbar_toggle_request &&
+                       g_pending_native_anchor_ticks == 0u;
+    g_reader_toolbar_toggle_button->setEnabled(ready);
+}
+
+static void showNickelTurnDialog(const QString &message) {
+    ConfirmationDialogFactoryShowOKDialogFn show_dialog =
+        reinterpret_cast<ConfirmationDialogFactoryShowOKDialogFn>(
+            nickelturn_confirmation_dialog_factory_show_ok_dialog);
+    if (show_dialog == nullptr) {
+        nickelturn_event_log("NickelTurn: native dialog API unavailable; user message was not displayed");
+        return;
+    }
+    show_dialog(QString::fromUtf8("NickelTurn"), message);
+}
+
+static void queueNickelTurnDialog(const char *message) {
+    if (g_pending_dialog_message.isEmpty())
+        g_pending_dialog_message = QString::fromUtf8(message);
+}
+
+static void processPendingNickelTurnDialog() {
+    if (g_pending_dialog_message.isEmpty())
+        return;
+    const QString message = g_pending_dialog_message;
+    g_pending_dialog_message.clear();
+    showNickelTurnDialog(message);
+}
+
+// 排版已切換但找不到安全的書籤還原方式時，延後通知使用者。
+static void processBookmarkRestoreCompatibilityNotice() {
+    if (g_bookmark_notice_ticks == 0u)
+        return;
+    --g_bookmark_notice_ticks;
+    if (g_bookmark_notice_ticks != 0u)
+        return;
+    g_bookmark_restore_warning_pending = false;
+
+    showNickelTurnDialog(QString::fromUtf8(kDialogMessages.bookmark));
+}
+
+// 每 250ms 在 Qt 主執行緒處理延後工作與更新按鈕狀態。
 static void processNickelTurnTimer() {
     processPendingHorizontalSourceMode();
     processPendingNativeAnchorRestore();
-    processCssHandoffDiagnostic();
-    if (g_nickelmenu_toggle_requested == 0)
-        return;
-    g_nickelmenu_toggle_requested = 0;
-    processNickelMenuToggleRequest();
+    processPendingReaderToolbarToggleClick();
+    processPendingNickelTurnDialog();
+    processBookmarkRestoreCompatibilityNotice();
+    updateReaderToolbarToggleButton();
 }
 
-// 建立 NickelMenu 選項與 signal script，並啟動 Qt 主事件迴圈的切換處理。
-static bool installNickelMenuBridge() {
+// 建立 NickelTurn 狀態目錄並啟動延遲工作用的 Qt timer。
+static bool installNickelTurnRuntime() {
     if (!ensureNickelTurnDirectories())
-        return false;
-    if (!installNickelTurnToggleSignalHandler())
         return false;
     QCoreApplication *app = QCoreApplication::instance();
     if (app == nullptr) {
-        nickelturn_event_log("NickelTurn Qt application unavailable; NickelMenu bridge disabled");
+        nickelturn_event_log("NickelTurn Qt application unavailable; reader toolbar integration disabled");
         return false;
     }
-    g_nickelmenu_toggle_timer = new QTimer(app);
-    g_nickelmenu_toggle_timer->setInterval(250);
-    QObject::connect(g_nickelmenu_toggle_timer, &QTimer::timeout, processNickelTurnTimer);
-    g_nickelmenu_toggle_timer->start();
-    if (!markNickelTurnReady()) {
-        g_nickelmenu_toggle_timer->stop();
-        g_nickelmenu_toggle_timer = nullptr;
-        return false;
-    }
+    g_nickelturn_timer = new QTimer(app);
+    g_nickelturn_timer->setInterval(250);
+    QObject::connect(g_nickelturn_timer, &QTimer::timeout, processNickelTurnTimer);
+    g_nickelturn_timer->start();
     return true;
 }
 
 // Hook KEPUB CSS 交接點；命中 JSON 模式時才附加直排或橫排 CSS。
 extern "C" void NickelTurnWebkitAddCssToHtml(void *webkit_view, QString css) {
-    const uintptr_t caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
     WebkitAddCssToHtmlFn original = reinterpret_cast<WebkitAddCssToHtmlFn>(nickelturn_original_webkit_add_css_to_html);
     if (original == nullptr) {
         nickelturn_log("NickelTurn original WebkitView::addCssToHtml pointer missing");
         return;
     }
 
+    if (!g_runtime_ready) {
+        original(webkit_view, css);
+        return;
+    }
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+
     const bool kepub_caller = wasCalledByKepubCssBuilder(caller);
     if (kepub_caller) {
         // 必須在附加 JSON 覆寫前讀取 css，才能取得書籍原始而非有效排版方向。
         observeVerticalSourceModeFromCss(css);
-        QString content_id;
         char override_mode[16];
-        if (getActiveModeJsonOverride(&content_id, override_mode, sizeof(override_mode))) {
-            recordCssHandoffDiagnostic(CssHandoffDiagnosticAppended, content_id, override_mode);
+        if (getActiveModeJsonOverride(override_mode, sizeof(override_mode))) {
             if (strcmp(override_mode, "vertical-rl") == 0)
                 css.append(QLatin1String(kVerticalOverrideCss));
             else
                 css.append(QLatin1String(kHorizontalOverrideCss));
-        } else if (content_id.isEmpty()) {
-            recordCssHandoffDiagnostic(CssHandoffDiagnosticNoActiveContent, content_id, nullptr);
-        } else {
-            recordCssHandoffDiagnostic(CssHandoffDiagnosticNoOverride, content_id, nullptr);
         }
     }
 
     original(webkit_view, css);
 }
 
-// 在 Nickel 啟動時驗證所有實際使用的 firmware symbol／offset，再啟用功能。
+// 在 Nickel 啟動時驗證必要的 Nickel API 符號，再啟用功能。
 extern "C" int nickelturn_initialize(void) {
-    nickelturn_event_log("NickelTurn: firmware profile=%s Build ID=%s",
-                         kFirmwareVersion, kFirmwareBuildId);
-    // 每次啟動都先撤銷舊 ready marker。只要新版 firmware 讓 guard 失敗，舊版 script
-    // 就會安全失敗並由 NickelMenu 顯示錯誤，不會向沒有 handler 的 Nickel 發送 SIGUSR1。
-    if (unlink(kNickelTurnReadyFlag) != 0 && errno != ENOENT) {
-        nickelturn_event_log("NickelTurn: cannot clear stale ready marker error=%s", strerror(errno));
-    }
+    nickelturn_event_log("NickelTurn: initialization started");
+    // 移除舊版 NickelMenu 整合留下的 NickelTurn 專屬檔案。
+    removeLegacyNickelMenuArtifact(kNickelTurnNickelMenuConfig, "config");
+    removeLegacyNickelMenuArtifact(kNickelTurnToggleScript, "toggle script");
+    removeLegacyNickelMenuArtifact(kNickelTurnReadyFlag, "ready marker");
     void *const required_symbols[] = {
+        nickelturn_confirmation_dialog_factory_show_ok_dialog,
         nickelturn_original_webkit_add_css_to_html,
         nickelturn_kepub_add_css_to_html,
         nickelturn_update_html_css,
@@ -1044,29 +1469,25 @@ extern "C" int nickelturn_initialize(void) {
         nickelturn_webkit_web_view,
         nickelturn_custom_set_page_progression_direction,
         nickelturn_original_reading_view_left_to_right_page_progress_direction,
-        nickelturn_bookmark_for_current_location,
-        nickelturn_bookmark_shared_data_destructor,
-        nickelturn_scobject_destructor,
-        nickelturn_kepub_go_to_bookmark_anchor,
-        nickelturn_bookmark_shared_data_assign,
         nickelturn_original_content_get_book_id,
         nickelturn_content_get_book_id,
         nickelturn_kepub_render_shortcover,
         nickelturn_original_webkit_set_writing_direction,
         nickelturn_kepub_set_writing_direction,
         nickelturn_webkit_set_writing_direction,
+        nickelturn_original_reading_menu_view_constructor,
+        nickelturn_original_quick_turn_event_filter_constructor,
     };
     const char *const required_symbol_names[] = {
+        "ConfirmationDialogFactory::showOKDialog",
         "WebkitView::addCssToHtml", "KepubBookReader::addCssToHtml",
         "KepubBookReaderBase::updateHtmlCss", "KepubBookReaderBase::reloadChapter",
         "WebkitView::webView", "CustomWebView::setPageProgressionDirection",
         "ReadingView::leftToRightPageProgressDirection",
-        "KepubBookReaderBase::bookmarkForCurrentLocation",
-        "Bookmark shared-data destructor", "ScObject destructor",
-        "KepubBookReaderBase::goToBookmarkAnchor", "Bookmark shared-data assignment",
         "Content::getBookId", "Content::getBookId KEPUB caller guard",
         "KepubBookReader::renderShortcover", "WebkitView::setWritingDirection original",
         "KepubBookReader::setWritingDirection", "WebkitView::setWritingDirection KEPUB caller guard",
+        "ReadingMenuView constructor", "QuickTurnEventFilter constructor",
     };
     if (!areRequiredSymbolsAvailable(required_symbols,
                                      required_symbol_names,
@@ -1079,36 +1500,68 @@ extern "C" int nickelturn_initialize(void) {
         nickelturn_event_log("NickelTurn: cannot determine libnickel base address");
         return 1;
     }
-    const FirmwareOffsetGuard guards[] = {
-        {nickelturn_kepub_add_css_to_html, kKepubAddCssToHtmlOffset,
-         "KepubBookReader::addCssToHtml", &g_kepub_add_css_start},
-        {nickelturn_update_html_css, kUpdateHtmlCssOffset,
-         "KepubBookReaderBase::updateHtmlCss", nullptr},
-        {nickelturn_reload_chapter, kReloadChapterOffset,
-         "KepubBookReaderBase::reloadChapter", nullptr},
-        {nickelturn_custom_set_page_progression_direction,
-         kCustomSetPageProgressionDirectionOffset,
-         "CustomWebView::setPageProgressionDirection", nullptr},
-        {nickelturn_kepub_render_shortcover, kKepubRenderShortcoverOffset,
-         "KepubBookReader::renderShortcover", &g_kepub_render_shortcover_start},
-        {nickelturn_content_get_book_id, kContentGetBookIdOffset, "Content::getBookId", nullptr},
-        {nickelturn_kepub_set_writing_direction, kKepubSetWritingDirectionOffset,
-         "KepubBookReader::setWritingDirection", &g_kepub_set_writing_direction_start},
-        {nickelturn_webkit_set_writing_direction, kWebkitSetWritingDirectionOffset,
-         "WebkitView::setWritingDirection", nullptr},
-        {nickelturn_bookmark_for_current_location, kBookmarkForCurrentLocationOffset,
-         "KepubBookReaderBase::bookmarkForCurrentLocation", nullptr},
-        {nickelturn_kepub_go_to_bookmark_anchor, kKepubGoToBookmarkAnchorOffset,
-         "KepubBookReaderBase::goToBookmarkAnchor", nullptr},
-        {nickelturn_bookmark_shared_data_assign, kBookmarkSharedDataAssignOffset,
-         "Bookmark shared-data assignment", nullptr},
+    void *const nickel_symbols[] = {
+        nickelturn_confirmation_dialog_factory_show_ok_dialog,
+        nickelturn_kepub_add_css_to_html,
+        nickelturn_update_html_css,
+        nickelturn_reload_chapter,
+        nickelturn_custom_set_page_progression_direction,
+        nickelturn_kepub_render_shortcover,
+        nickelturn_content_get_book_id,
+        nickelturn_kepub_set_writing_direction,
+        nickelturn_webkit_set_writing_direction,
+        nickelturn_original_reading_menu_view_constructor,
     };
-    for (size_t i = 0; i < sizeof(guards) / sizeof(guards[0]); ++i) {
-        if (!validateLibnickelOffset(guards[i].symbol, base_info.dli_fbase, guards[i].offset,
-                                     guards[i].symbol_name, guards[i].normalized_address)) {
+    const char *const nickel_symbol_names[] = {
+        "ConfirmationDialogFactory::showOKDialog",
+        "KepubBookReader::addCssToHtml",
+        "KepubBookReaderBase::updateHtmlCss",
+        "KepubBookReaderBase::reloadChapter",
+        "CustomWebView::setPageProgressionDirection",
+        "KepubBookReader::renderShortcover",
+        "Content::getBookId",
+        "KepubBookReader::setWritingDirection",
+        "WebkitView::setWritingDirection",
+        "ReadingMenuView constructor",
+    };
+    for (size_t i = 0; i < sizeof(nickel_symbols) / sizeof(nickel_symbols[0]); ++i) {
+        Dl_info symbol_info;
+        if (dladdr(nickel_symbols[i], &symbol_info) == 0 ||
+            symbol_info.dli_fbase != base_info.dli_fbase) {
+            nickelturn_event_log("NickelTurn: resolved Nickel API is outside libnickel name=%s",
+                                 nickel_symbol_names[i]);
             return 1;
         }
     }
+    void *optional_bookmark_symbols[] = {
+        nickelturn_bookmark_for_current_location,
+        nickelturn_bookmark_shared_data_destructor,
+        nickelturn_scobject_destructor,
+        nickelturn_reading_view_go_to_bookmark,
+    };
+    for (size_t i = 0; i < sizeof(optional_bookmark_symbols) /
+                            sizeof(optional_bookmark_symbols[0]); ++i) {
+        if (optional_bookmark_symbols[i] == nullptr)
+            continue;
+        Dl_info symbol_info;
+        if (dladdr(optional_bookmark_symbols[i], &symbol_info) == 0 ||
+            symbol_info.dli_fbase != base_info.dli_fbase) {
+            optional_bookmark_symbols[i] = nullptr;
+        }
+    }
+    nickelturn_bookmark_for_current_location = optional_bookmark_symbols[0];
+    nickelturn_bookmark_shared_data_destructor = optional_bookmark_symbols[1];
+    nickelturn_scobject_destructor = optional_bookmark_symbols[2];
+    nickelturn_reading_view_go_to_bookmark = optional_bookmark_symbols[3];
+
+    const bool reading_view_bookmark_symbols_ready =
+        nickelturn_bookmark_for_current_location != nullptr &&
+        nickelturn_bookmark_shared_data_destructor != nullptr &&
+        nickelturn_scobject_destructor != nullptr &&
+        nickelturn_reading_view_go_to_bookmark != nullptr;
+    g_bookmark_restore_warning_pending = !reading_view_bookmark_symbols_ready;
+    nickelturn_event_log("NickelTurn: ReadingView bookmark symbols ready=%d",
+                         reading_view_bookmark_symbols_ready ? 1 : 0);
 
     g_native_kepub_api.update_html_css =
         reinterpret_cast<KepubUpdateHtmlCssFn>(nickelturn_update_html_css);
@@ -1121,22 +1574,17 @@ extern "C" int nickelturn_initialize(void) {
         nickelturn_custom_set_page_progression_direction);
     g_native_kepub_api.bookmark_for_current_location =
         reinterpret_cast<BookmarkForCurrentLocationFn>(nickelturn_bookmark_for_current_location);
+    g_native_kepub_api.reading_view_go_to_bookmark =
+        reinterpret_cast<ReadingViewGoToBookmarkFn>(
+            nickelturn_reading_view_go_to_bookmark);
     g_native_kepub_api.destroy_bookmark_shared_data =
         reinterpret_cast<BookmarkStorageDestructorFn>(nickelturn_bookmark_shared_data_destructor);
     g_native_kepub_api.destroy_scobject =
         reinterpret_cast<BookmarkStorageDestructorFn>(nickelturn_scobject_destructor);
-    g_native_kepub_api.go_to_bookmark_anchor =
-        reinterpret_cast<KepubGoToBookmarkAnchorFn>(nickelturn_kepub_go_to_bookmark_anchor);
-    g_native_kepub_api.assign_bookmark_shared_data =
-        reinterpret_cast<BookmarkSharedDataAssignFn>(nickelturn_bookmark_shared_data_assign);
-    if (!isNativeKepubApiReady()) {
-        return 1;
-    }
-
-    g_firmware_matches = true;
+    g_runtime_ready = true;
     parseModeJsonAtInit();
-    if (installNickelMenuBridge()) {
-        nickelturn_event_log("NickelTurn: initialization complete; firmware guard passed and menu bridge ready");
-    }
+    if (!installNickelTurnRuntime())
+        return 1;
+    nickelturn_event_log("NickelTurn: initialization complete; reader toolbar integration ready");
     return 0;
 }

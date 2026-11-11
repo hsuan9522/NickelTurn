@@ -8,44 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  profiles:
-    runs-on: ubuntu-latest
-    outputs:
-      firmware: ${{ steps.list.outputs.firmware }}
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-      - name: List firmware profiles
-        id: list
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-
-          with open("config/firmware.mk", encoding="utf-8") as config:
-              firmware_line = next(
-                  (line for line in config if line.startswith("NT_SUPPORTED_FIRMWARES")),
-                  "",
-              )
-          profiles = firmware_line.split(":=", 1)[-1].split()
-          if not profiles:
-              raise SystemExit("No firmware versions configured in config/firmware.mk")
-          if any(not re.fullmatch(r"\d+\.\d+\.\d+", item) for item in profiles):
-              raise SystemExit("Invalid firmware version in config/firmware.mk")
-          if len(profiles) != len(set(profiles)):
-              raise SystemExit("Duplicate firmware version in config/firmware.mk")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("firmware=" + json.dumps(profiles) + "\n")
-          PY
-
   build:
-    needs: profiles
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        firmware: ${{ fromJSON(needs.profiles.outputs.firmware) }}
 
     steps:
       - name: Checkout source and NickelHook
@@ -62,27 +26,13 @@ jobs:
             --env=HOME \
             --entrypoint=make \
             ghcr.io/pgaskin/nickeltc:1.0 \
-            clean all koboroot NT_BUILD=full NT_FIRMWARE=${{ matrix.firmware }}
-
-      - name: Wrap KoboRoot for download
-        env:
-          NT_FIRMWARE: ${{ matrix.firmware }}
-        run: |
-          mkdir -p release-assets
-          python3 - <<'PY'
-          import os
-          from zipfile import ZIP_DEFLATED, ZipFile
-
-          firmware = os.environ["NT_FIRMWARE"]
-          with ZipFile(f"release-assets/NickelTurn-{firmware}.zip", "w", ZIP_DEFLATED) as package:
-              package.write("KoboRoot.tgz", arcname="KoboRoot.tgz")
-          PY
+            clean all koboroot NT_BUILD=full
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: package-${{ matrix.firmware }}
-          path: release-assets/NickelTurn-${{ matrix.firmware }}.zip
+          name: package
+          path: KoboRoot.tgz
           if-no-files-found: error
           retention-days: 14
 
@@ -93,18 +43,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download firmware packages
+      - name: Download Kobo installation package
         uses: actions/download-artifact@v4
         with:
-          pattern: package-*
+          name: package
           path: release-assets
-          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          files: release-assets/*.zip
+          files: release-assets/KoboRoot.tgz
           generate_release_notes: true
           fail_on_unmatched_files: true
