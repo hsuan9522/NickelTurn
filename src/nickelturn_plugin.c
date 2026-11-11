@@ -29,6 +29,11 @@ extern void *nickelturn_reading_view_left_to_right_writing_direction;
 extern void *nickelturn_reading_menu_view_font_button;
 extern void *nickelturn_reading_menu_view_stats_button;
 extern void *nickelturn_original_breadcrumb_slider_constructor;
+extern void *nickelturn_original_reading_menu_scrubber_controller_constructor;
+extern void *nickelturn_scrubber_view_left_button;
+extern void *nickelturn_scrubber_view_right_button;
+extern void *nickelturn_scrubber_controller_prev_chapter;
+extern void *nickelturn_scrubber_controller_next_chapter;
 extern void *nickelturn_breadcrumb_slider_set_thick_line_enabled;
 extern void *nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled;
 extern void *nickelturn_touch_label_constructor;
@@ -97,6 +102,14 @@ static struct nh_hook NickelTurnHook[] = {
         .desc = "NickelTurn reading menu scrubber style synchronization",
         .optional = true,
     },
+    {
+        .sym = "_ZN29ReadingMenuScrubberControllerC1EP11ReadingView",
+        .sym_new = "NickelTurnReadingMenuScrubberControllerConstructor",
+        .lib = "libnickel.so.1",
+        .out = &nickelturn_original_reading_menu_scrubber_controller_constructor,
+        .desc = "NickelTurn progress-bar chapter button routing",
+        .optional = true,
+    },
     {0},
 };
 
@@ -129,6 +142,30 @@ static struct nh_dlsym NickelTurnDlsym[] = {
         .name = "_ZNK11ReadingView27leftToRightWritingDirectionEv",
         .out = &nickelturn_reading_view_left_to_right_writing_direction,
         .desc = "ReadingView effective page progression direction",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK23ReadingMenuScrubberView4leftEv",
+        .out = &nickelturn_scrubber_view_left_button,
+        .desc = "ReadingMenuScrubberView chapter-left button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZNK23ReadingMenuScrubberView5rightEv",
+        .out = &nickelturn_scrubber_view_right_button,
+        .desc = "ReadingMenuScrubberView chapter-right button getter",
+        .optional = true,
+    },
+    {
+        .name = "_ZN29ReadingMenuScrubberController11prevChapterEv",
+        .out = &nickelturn_scrubber_controller_prev_chapter,
+        .desc = "ReadingMenuScrubberController native previous-chapter action",
+        .optional = true,
+    },
+    {
+        .name = "_ZN29ReadingMenuScrubberController11nextChapterEv",
+        .out = &nickelturn_scrubber_controller_next_chapter,
+        .desc = "ReadingMenuScrubberController native next-chapter action",
         .optional = true,
     },
     {

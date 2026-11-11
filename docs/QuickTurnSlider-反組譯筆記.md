@@ -65,11 +65,15 @@
 
 實機驗證：使用者回報這版修正已成功，能在排版切換後更新進度列樣式。這支持「只改 TouchSlider 旗標並呼叫 update 不足，還需對 style unpolish/polish」的判斷。QuickTurnSlider 與 BreadcrumbSlider 是兩個不同元件；目前程式只改動 BreadcrumbSlider。
 
-### 左右章節按鈕的動作
+### 閱讀選單的頁面箭頭與章節箭頭
 
-`ReadingMenuScrubberController::loadView()` 建立 view 後，將左右按鈕連到 `prevChapter()` 和 `nextChapter()`。這兩個槽分別呼叫 `ReadingView::goToPrevChapter()` 與 `goToNextChapter()`，方向映射在 view 建立時確定；只改 `BreadcrumbSlider` 的方向旗標不會改動這些連線。
+使用者實機照片指出閱讀選單有兩組不同的控制：閱讀區左右兩側箭頭負責逐頁移動；進度列左右端的箭頭負責章節跳轉。方向問題只涉及進度列旁的章節箭頭。
 
-4.46 的槽位址為 `prevChapter()` `0x00fc383c`、`nextChapter()` `0x00fc38cc`；4.45 分別為 `0x00fb7c08`、`0x00fb7c98`。兩版都匯出相同 mangled 名稱。直接 hook 這兩個槽未能修正實機按鈕行為，因此目前改在 `loadView()` 完成後，解除左右按鈕到 controller 的原有連線，再接到方向感知的路由。路由每次點擊時依當前 `ReadingView::leftToRightWritingDirection()` 呼叫原本的 `prevChapter()`／`nextChapter()`，保留 Kobo 的章節跳轉與事件流程。這個 signal 重綁方案尚待重新建置並在實機確認。
+4.46 的 `ReadingMenuScrubberView` getter 對應不同 UI 欄位：`left()` 回傳 `Ui` 物件 `+0x24` 的 widget，`right()` 回傳 `+0x2c`；`goBackLeft()` 回傳 `+0x14`，`goBackRight()` 回傳 `+0x1c`。`ReadingMenuScrubberController::loadView()` 對四個 getter 各建立一條 Qt 連線，因此不能把兩組按鈕當成同一組。
+
+已由 `loadView()` 的 GOT relocation 確認 `left()` 的 `TouchLabel::tapped(bool)` 連到 `prevChapter()`，`right()` 的同一訊號連到 `nextChapter()`。`prevChapter()` (`0x00fc383c`) 呼叫 `ReadingView::goToPrevChapter()`；`nextChapter()` (`0x00fc38cc`) 呼叫 `ReadingView::goToNextChapter()`。因此閱讀進度列上的藍色章節箭頭是 `left()/right()` 這組；照片中紅色逐頁箭頭不屬於這兩個章節槽。`goBackLeft()/goBackRight()` 是另一組按鈕；`updateBackButtons()` 會依 bookmark history 與目前位置更新其顯示狀態，不能拿來替代章節按鈕。
+
+4.45 的 `loadView()`（`0x00fb8f04`）與 `prevChapter()`／`nextChapter()`（`0x00fb7c08`／`0x00fb7c98`）也存在相同符號；兩版 `loadView()` 都將 view 指標存於 controller `this + 0x14`。程式在 controller 建構後等待 view 建立，再解除 `left()/right()` 到原生槽的連線，改接依 `ReadingView::leftToRightWritingDirection()` 選擇 `prevChapter()`／`nextChapter()` 的路由；`goBackLeft()/goBackRight()` 和紅色逐頁控制不變。使用者已確認實機章節方向修正成功。每次點擊的診斷 log 已移除，保留路由初始化失敗時的必要錯誤 log。
 
 ### 私有物件欄位觀察
 

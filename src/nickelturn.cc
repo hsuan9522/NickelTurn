@@ -29,6 +29,7 @@
 #include <QtCore/QSize>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QTimer>
+#include <QtCore/QVariant>
 #include <QtGui/QBrush>
 #include <QtGui/QIcon>
 #include <QtGui/QPalette>
@@ -45,6 +46,7 @@
 
 #include <NickelHook.h>
 #include "nickelturn_log.h"
+#include "nickelturn_chapter_route.h"
 
 // 此處不可引入或連結 QtWebKit。NickelTC 沒有 WebKit 開發用的 pkg-config
 // 資訊；但 WebkitView::addCssToHtml 以值傳遞 QString，因此仍需要 QtCore。
@@ -652,6 +654,11 @@ void *nickelturn_reading_menu_view_stats_button = nullptr;
 void *nickelturn_original_breadcrumb_slider_constructor = nullptr;
 void *nickelturn_breadcrumb_slider_set_thick_line_enabled = nullptr;
 void *nickelturn_breadcrumb_slider_set_inverse_thick_line_enabled = nullptr;
+void *nickelturn_original_reading_menu_scrubber_controller_constructor = nullptr;
+void *nickelturn_scrubber_view_left_button = nullptr;
+void *nickelturn_scrubber_view_right_button = nullptr;
+void *nickelturn_scrubber_controller_prev_chapter = nullptr;
+void *nickelturn_scrubber_controller_next_chapter = nullptr;
 void *nickelturn_touch_label_constructor = nullptr;
 void *nickelturn_touch_label_set_deselected_pixmap = nullptr;
 void *nickelturn_touch_label_set_selected_pixmap = nullptr;
@@ -688,6 +695,143 @@ extern "C" void NickelTurnBreadcrumbSliderConstructor(void *slider, QWidget *par
     if (widget == nullptr || !widget->inherits("BreadcrumbSlider"))
         return;
     g_reading_menu_breadcrumb_slider = widget;
+}
+
+typedef QWidget *(*ScrubberButtonGetterFn)(const void *);
+typedef void (*ScrubberChapterActionFn)(void *);
+typedef void (*ScrubberControllerConstructorFn)(void *, void *);
+
+// 回傳 1 表示已接好、0 表示 view 尚未建立、-1 表示無法安全安裝。
+static int installScrubberChapterButtonRouting(void *controller, QWidget *reading_view) {
+    if (controller == nullptr || reading_view == nullptr)
+        return -1;
+
+    QWidget *scrubber_view = *reinterpret_cast<QWidget **>(
+        reinterpret_cast<char *>(controller) + kScrubberControllerViewOffset);
+    if (scrubber_view == nullptr)
+        return 0;
+    if (!scrubber_view->inherits("ReadingMenuScrubberView")) {
+        nickelturn_event_log("NickelTurn: chapter routing skipped; controller view class=%s",
+                             scrubber_view->metaObject()->className());
+        return -1;
+    }
+
+    ScrubberButtonGetterFn left_getter =
+        reinterpret_cast<ScrubberButtonGetterFn>(nickelturn_scrubber_view_left_button);
+    ScrubberButtonGetterFn right_getter =
+        reinterpret_cast<ScrubberButtonGetterFn>(nickelturn_scrubber_view_right_button);
+    ScrubberChapterActionFn prev_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_prev_chapter);
+    ScrubberChapterActionFn next_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_next_chapter);
+    if (left_getter == nullptr || right_getter == nullptr ||
+        prev_chapter == nullptr || next_chapter == nullptr) {
+        nickelturn_event_log("NickelTurn: chapter routing unavailable getter-left=%d getter-right=%d prev=%d next=%d",
+                             left_getter != nullptr ? 1 : 0,
+                             right_getter != nullptr ? 1 : 0,
+                             prev_chapter != nullptr ? 1 : 0,
+                             next_chapter != nullptr ? 1 : 0);
+        return -1;
+    }
+
+    QWidget *left_button = left_getter(scrubber_view);
+    QWidget *right_button = right_getter(scrubber_view);
+    if (left_button == nullptr || right_button == nullptr ||
+        !left_button->inherits("TouchLabel") || !right_button->inherits("TouchLabel")) {
+        nickelturn_event_log("NickelTurn: chapter routing skipped; button classes left=%s right=%s",
+                             left_button != nullptr ? left_button->metaObject()->className() : "null",
+                             right_button != nullptr ? right_button->metaObject()->className() : "null");
+        return -1;
+    }
+
+    NickelTurnChapterButtonRoute *route =
+        new NickelTurnChapterButtonRoute(controller, reading_view, scrubber_view);
+    const bool left_connected = QObject::connect(
+        left_button, SIGNAL(tapped(bool)), route, SLOT(leftTapped(bool)));
+    const bool right_connected = QObject::connect(
+        right_button, SIGNAL(tapped(bool)), route, SLOT(rightTapped(bool)));
+    if (!left_connected || !right_connected) {
+        delete route;
+        nickelturn_event_log("NickelTurn: chapter routing connect failed left=%d right=%d",
+                             left_connected ? 1 : 0, right_connected ? 1 : 0);
+        return -1;
+    }
+
+    // 原生 loadView 將 left/right 分別連到 prevChapter/nextChapter；新路由接妥後
+    // 才移除這兩個 sender 到 controller 的原生連線，goBackLeft/Right 完全不動。
+    QObject::disconnect(left_button, nullptr, static_cast<QObject *>(controller), nullptr);
+    QObject::disconnect(right_button, nullptr, static_cast<QObject *>(controller), nullptr);
+    return 1;
+}
+
+// Controller 建構時 view 尚未建立；用短 timer 等 loadView 完成，再改進度列章節按鈕連線。
+extern "C" void NickelTurnReadingMenuScrubberControllerConstructor(
+    void *controller, void *reading_view) {
+    ScrubberControllerConstructorFn original =
+        reinterpret_cast<ScrubberControllerConstructorFn>(
+            nickelturn_original_reading_menu_scrubber_controller_constructor);
+    if (original == nullptr) {
+        nickelturn_event_log("NickelTurn: original scrubber controller constructor missing");
+        return;
+    }
+    original(controller, reading_view);
+    if (controller == nullptr || reading_view == nullptr)
+        return;
+
+    QObject *controller_object = static_cast<QObject *>(controller);
+    QTimer *timer = new QTimer(controller_object);
+    timer->setInterval(25);
+    timer->setProperty("nickelturn-attempts", 0);
+    QObject::connect(timer, &QTimer::timeout, timer,
+                     [controller, reading_view, timer]() {
+        const int result = installScrubberChapterButtonRouting(
+            controller, static_cast<QWidget *>(reading_view));
+        if (result != 0) {
+            timer->stop();
+            timer->deleteLater();
+            return;
+        }
+        const int attempts = timer->property("nickelturn-attempts").toInt() + 1;
+        timer->setProperty("nickelturn-attempts", attempts);
+        if (attempts >= 40) {
+            nickelturn_event_log("NickelTurn: chapter routing timed out waiting for scrubber view");
+            timer->stop();
+            timer->deleteLater();
+        }
+    });
+    timer->start(0);
+}
+
+NickelTurnChapterButtonRoute::NickelTurnChapterButtonRoute(
+    void *controller, QWidget *reading_view, QObject *parent)
+    : QObject(parent), m_controller(controller), m_reading_view(reading_view) {
+}
+
+void NickelTurnChapterButtonRoute::leftTapped(bool) {
+    dispatch(true);
+}
+
+void NickelTurnChapterButtonRoute::rightTapped(bool) {
+    dispatch(false);
+}
+
+void NickelTurnChapterButtonRoute::dispatch(bool from_left) {
+    ReadingViewLeftToRightWritingDirectionFn get_direction =
+        reinterpret_cast<ReadingViewLeftToRightWritingDirectionFn>(
+            nickelturn_reading_view_left_to_right_writing_direction);
+    ScrubberChapterActionFn prev_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_prev_chapter);
+    ScrubberChapterActionFn next_chapter =
+        reinterpret_cast<ScrubberChapterActionFn>(nickelturn_scrubber_controller_next_chapter);
+    if (m_controller == nullptr || m_reading_view.isNull() || get_direction == nullptr ||
+        prev_chapter == nullptr || next_chapter == nullptr) {
+        nickelturn_event_log("NickelTurn: chapter tap ignored; routing API or reader unavailable");
+        return;
+    }
+
+    const bool left_to_right = get_direction(m_reading_view.data());
+    const bool call_prev = from_left == left_to_right;
+    (call_prev ? prev_chapter : next_chapter)(m_controller);
 }
 
 // 清除舊版 NickelMenu 整合留下的設定與 script。

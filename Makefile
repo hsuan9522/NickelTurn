@@ -25,6 +25,7 @@ ifeq ($(NT_BUILD),smoke)
 override SOURCES += src/nickelturn_smoke.c
 else ifeq ($(NT_BUILD),full)
 override SOURCES += src/nickelturn_plugin.c src/nickelturn.cc
+override MOCS += src/nickelturn_chapter_route.h
 else
 $(error NT_BUILD must be smoke or full)
 endif

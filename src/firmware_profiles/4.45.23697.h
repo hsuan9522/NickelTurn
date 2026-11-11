@@ -22,3 +22,5 @@ const uintptr_t kWebkitSetWritingDirectionOffset = 0x00bc8b50u;
 const uintptr_t kCustomSetPageProgressionDirectionOffset = 0x00bc11ccu;
 // ReadingMenuView constructor, verified in the supplied firmware ELF.
 const uintptr_t kReadingMenuViewConstructorOffset = 0x00fc2308u;
+// ReadingMenuScrubberController::loadView stores its view pointer at this+0x14.
+const size_t kScrubberControllerViewOffset = 0x14u;
