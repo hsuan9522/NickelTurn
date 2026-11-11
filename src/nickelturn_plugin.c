@@ -117,7 +117,7 @@ static struct nh_dlsym NickelTurnDlsym[] = {
     {
         .name = "_ZN25ConfirmationDialogFactory12showOKDialogERK7QStringS2_",
         .out = &nickelturn_confirmation_dialog_factory_show_ok_dialog,
-        .desc = "Nickel native OK dialog for firmware compatibility warnings",
+        .desc = "Nickel native OK dialog for user notifications",
     },
     {
         .name = "_ZNK15ReadingMenuView10fontButtonEv",

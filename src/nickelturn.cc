@@ -56,13 +56,20 @@ extern void *nickelturn_kepub_render_shortcover;
 extern void *nickelturn_kepub_set_writing_direction;
 }
 
-static void showNickelTurnDialog(const char *message);
+static void showNickelTurnDialog(const QString &message);
 static void queueNickelTurnDialog(const char *message);
 
-static const char kSwitchFailedDialog[] = "切換失敗，請查看 nickel-turn.log。";
-static const char kFirmwareMismatchDialog[] = "此韌體與 NickelTurn 不相容，無法切換排版。";
-static const char kBookmarkRestoreFailedDialog[] =
-    "排版轉換已成功，但此韌體無法還原切換前的書籍位置。";
+struct DialogMessages {
+    const char *firmware;
+    const char *bookmark;
+    const char *switch_failed;
+};
+
+static const DialogMessages kDialogMessages = {
+    "此韌體與 NickelTurn 不相容，無法切換排版。",
+    "排版轉換已成功，但此韌體無法還原切換前的書籍位置。",
+    "切換失敗，請查看 nickel-turn.log。",
+};
 
 namespace {
 
@@ -580,24 +587,6 @@ bool areRequiredSymbolsAvailable(void *const *symbols, const char *const *names,
     return true;
 }
 
-// 確認所有切換流程所需的原生函式入口都已解析。
-bool isNativeKepubApiReady() {
-#define CHECK_NATIVE_API(field, label) \
-    do { \
-        if (g_native_kepub_api.field == nullptr) { \
-            nickelturn_event_log("NickelTurn: native API entrypoint unavailable name=%s", label); \
-            return false; \
-        } \
-    } while (0)
-    CHECK_NATIVE_API(update_html_css, "updateHtmlCss");
-    CHECK_NATIVE_API(reload_chapter, "reloadChapter");
-    CHECK_NATIVE_API(set_writing_direction, "setWritingDirection");
-    CHECK_NATIVE_API(web_view, "webView");
-    CHECK_NATIVE_API(set_page_progression, "setPageProgressionDirection");
-#undef CHECK_NATIVE_API
-    return true;
-}
-
 // 釋放 bookmarkForCurrentLocation 建構出的暫存 Bookmark，確保兩個析構步驟不會漏掉其一。
 void destroyCapturedBookmark(BookmarkStorage *bookmark) {
     g_native_kepub_api.destroy_bookmark_shared_data(
@@ -1082,12 +1071,6 @@ static void processNickelTurnToggleRequest() {
     if (!has_override)
         (void)snprintf(current_mode, sizeof(current_mode), "%s", sourceModeName(state.source_mode));
     const char *target_mode = strcmp(current_mode, "vertical-rl") == 0 ? "horizontal-tb" : "vertical-rl";
-    if (!isNativeKepubApiReady()) {
-        nickelturn_event_log("NickelTurn native layout entrypoint is missing; layout unchanged ContentID=%s",
-                             content_id_utf8.constData());
-        showNickelTurnDialog(kFirmwareMismatchDialog);
-        return;
-    }
     void *custom_web_view = g_native_kepub_api.web_view(state.webkit_view);
     if (custom_web_view == nullptr) {
         nickelturn_event_log("NickelTurn: active CustomWebView is unavailable; layout unchanged ContentID=%s",
@@ -1116,7 +1099,7 @@ static void processNickelTurnToggleRequest() {
         }
         nickelturn_event_log("NickelTurn JSON update failed; layout unchanged ContentID=%s",
                              content_id_utf8.constData());
-        showNickelTurnDialog(kSwitchFailedDialog);
+        showNickelTurnDialog(QString::fromUtf8(kDialogMessages.switch_failed));
         return;
     }
     const bool vertical = strcmp(target_mode, "vertical-rl") == 0;
@@ -1278,7 +1261,7 @@ static void addReaderToolbarToggleButton(void *reading_menu_view) {
             g_reader_toolbar_button_diagnostic_logged = true;
             nickelturn_event_log("NickelTurn: no ReadingMenuView font/stats button layout anchor");
         }
-        queueNickelTurnDialog(kSwitchFailedDialog);
+        queueNickelTurnDialog(kDialogMessages.switch_failed);
         return;
     }
     typedef void (*TouchLabelConstructorFn)(void *, QWidget *, uint32_t);
@@ -1286,14 +1269,14 @@ static void addReaderToolbarToggleButton(void *reading_menu_view) {
         nickelturn_touch_label_constructor);
     if (touch_label_constructor == nullptr) {
         nickelturn_event_log("NickelTurn: TouchLabel constructor unavailable; reader toolbar toggle not inserted");
-        queueNickelTurnDialog(kFirmwareMismatchDialog);
+        queueNickelTurnDialog(kDialogMessages.firmware);
         return;
     }
     // TouchLabel 是 libnickel 私有類別，沒有可用標頭；依 NickelMenu 的作法配置原生物件儲存區後呼叫其韌體建構函式。
     void *touch_label_storage = calloc(1, 256u);
     if (touch_label_storage == nullptr) {
         nickelturn_event_log("NickelTurn: cannot allocate TouchLabel storage; reader toolbar toggle not inserted");
-        queueNickelTurnDialog(kSwitchFailedDialog);
+        queueNickelTurnDialog(kDialogMessages.switch_failed);
         return;
     }
     QWidget *button_parent = anchor.widget->parentWidget();
@@ -1341,7 +1324,7 @@ static void addReaderToolbarToggleButton(void *reading_menu_view) {
         button, SIGNAL(tapped(bool)), click_shim, SIGNAL(pressed()));
     if (!tap_connection) {
         nickelturn_event_log("NickelTurn: cannot connect TouchLabel::tapped(bool) to click shim");
-        queueNickelTurnDialog(kSwitchFailedDialog);
+        queueNickelTurnDialog(kDialogMessages.switch_failed);
         delete click_shim;
         delete button;
         return;
@@ -1378,7 +1361,7 @@ static void updateReaderToolbarToggleButton() {
     g_reader_toolbar_toggle_button->setEnabled(ready);
 }
 
-static void showNickelTurnDialog(const char *message) {
+static void showNickelTurnDialog(const QString &message) {
     ConfirmationDialogFactoryShowOKDialogFn show_dialog =
         reinterpret_cast<ConfirmationDialogFactoryShowOKDialogFn>(
             nickelturn_confirmation_dialog_factory_show_ok_dialog);
@@ -1386,7 +1369,7 @@ static void showNickelTurnDialog(const char *message) {
         nickelturn_event_log("NickelTurn: native dialog API unavailable; user message was not displayed");
         return;
     }
-    show_dialog(QString::fromUtf8("NickelTurn"), QString::fromUtf8(message));
+    show_dialog(QString::fromUtf8("NickelTurn"), message);
 }
 
 static void queueNickelTurnDialog(const char *message) {
@@ -1399,14 +1382,7 @@ static void processPendingNickelTurnDialog() {
         return;
     const QString message = g_pending_dialog_message;
     g_pending_dialog_message.clear();
-    ConfirmationDialogFactoryShowOKDialogFn show_dialog =
-        reinterpret_cast<ConfirmationDialogFactoryShowOKDialogFn>(
-            nickelturn_confirmation_dialog_factory_show_ok_dialog);
-    if (show_dialog == nullptr) {
-        nickelturn_event_log("NickelTurn: native dialog API unavailable; queued user message was not displayed");
-        return;
-    }
-    show_dialog(QString::fromUtf8("NickelTurn"), message);
+    showNickelTurnDialog(message);
 }
 
 // 排版已切換但找不到安全的書籤還原方式時，延後通知使用者。
@@ -1418,7 +1394,7 @@ static void processBookmarkRestoreCompatibilityNotice() {
         return;
     g_bookmark_restore_warning_pending = false;
 
-    showNickelTurnDialog(kBookmarkRestoreFailedDialog);
+    showNickelTurnDialog(QString::fromUtf8(kDialogMessages.bookmark));
 }
 
 // 每 250ms 在 Qt 主執行緒處理延後工作與更新按鈕狀態。
@@ -1578,14 +1554,14 @@ extern "C" int nickelturn_initialize(void) {
     nickelturn_scobject_destructor = optional_bookmark_symbols[2];
     nickelturn_reading_view_go_to_bookmark = optional_bookmark_symbols[3];
 
-    const bool public_bookmark_restore_ready =
+    const bool reading_view_bookmark_symbols_ready =
         nickelturn_bookmark_for_current_location != nullptr &&
         nickelturn_bookmark_shared_data_destructor != nullptr &&
         nickelturn_scobject_destructor != nullptr &&
         nickelturn_reading_view_go_to_bookmark != nullptr;
-    g_bookmark_restore_warning_pending = !public_bookmark_restore_ready;
+    g_bookmark_restore_warning_pending = !reading_view_bookmark_symbols_ready;
     nickelturn_event_log("NickelTurn: ReadingView bookmark symbols ready=%d",
-                         public_bookmark_restore_ready ? 1 : 0);
+                         reading_view_bookmark_symbols_ready ? 1 : 0);
 
     g_native_kepub_api.update_html_css =
         reinterpret_cast<KepubUpdateHtmlCssFn>(nickelturn_update_html_css);
@@ -1605,10 +1581,6 @@ extern "C" int nickelturn_initialize(void) {
         reinterpret_cast<BookmarkStorageDestructorFn>(nickelturn_bookmark_shared_data_destructor);
     g_native_kepub_api.destroy_scobject =
         reinterpret_cast<BookmarkStorageDestructorFn>(nickelturn_scobject_destructor);
-    if (!isNativeKepubApiReady()) {
-        return 1;
-    }
-
     g_runtime_ready = true;
     parseModeJsonAtInit();
     if (!installNickelTurnRuntime())

@@ -1,6 +1,6 @@
 # NickelTurn
 
-NickelTurn 是一項**實驗性功能**，建議安裝前先備份閱讀器，並自行承擔使用風險。
+NickelTurn 是一項搭配 AI 寫成的**實驗性功能**，建議安裝前先備份閱讀器，並自行承擔使用風險。
 本專案讓 Kobo 閱讀器使用者在閱讀時切換直排與橫排，目前僅支援 `KEPUB` 格式。安裝後，
 閱讀工具列會出現 **直橫** 按鈕，可在閱讀時切換直排與橫排。
 
@@ -9,15 +9,6 @@ NickelTurn 是一項**實驗性功能**，建議安裝前先備份閱讀器，�
 
 本專案採用 [MIT License](LICENSE) 授權。
 
-> [!警告]
->
-> 絕大部分程式碼由 AI 生成。本功能仍屬實驗性功能，依賴 Nickel 提供的函式符號與 ABI；韌體若移除或改變必要介面，可能需要更新外掛。
-
-`libnickel.so.1.0.0` 位於韌體中的 `usr/local/Kobo/libnickel.so.1.0.0`。
-
-## 移除方式
-
-在 `.adds/nickel-turn` 資料夾中新增名為 `uninstall` 的檔案，重新開機即會卸載相關檔案。
 
 ## 建置模式
 
@@ -47,9 +38,12 @@ sh build.sh
 NickelTurn 不需要安裝 NickelMenu。開啟 KEPUB 後，點一下頁面叫出閱讀工具列，按下 **直橫** 即可切換
 直排與橫排。
 
+**直橫** 按鈕位於閱讀工具列中，和字體、亮度等控制項並排：
+
+<img src="demoPicture/IMG_9250.jpg" alt="閱讀工具列中直橫按鈕的位置" width="360">
+
 升級舊版時，NickelTurn 初始化會清除先前留下的 `.adds/nm/nickelturn` 設定、切換 script 和 ready marker。
-清理只針對 NickelTurn 自己的舊檔，不會移除 NickelMenu 或其他 NickelMenu 設定；使用者的
-`book-modes.json` 也會保留。
+清理只針對 NickelTurn 自己的舊檔，不會移除 NickelMenu 或其他 NickelMenu 設定，因此若已經不需要 Nickelmenu 請依照 Nickelmenu 官方網站說明卸載。
 
 選擇的排版模式會儲存在：
 
@@ -69,6 +63,10 @@ JSON 使用 Kobo 原始的 `ContentID` 值作為索引，不會正規化 `file:/
   }
 }
 ```
+
+## 移除方式
+
+在 `.adds/nickel-turn` 資料夾中新增名為 `uninstall` 的檔案，重新開機即會卸載相關檔案。
 
 ## Log 紀錄
 

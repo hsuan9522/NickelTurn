@@ -1,5 +1,7 @@
 # QuickTurnSlider 反組譯筆記
 
+> 檔案來源： `libnickel.so.1.0.0` 位於韌體中的 `usr/local/Kobo/libnickel.so.1.0.0`。
+
 本文記錄 NickelTurn 對 Kobo 閱讀進度滑桿的反組譯觀察，避免重複尋找同一批函式。
 
 ## ELF 與範圍
